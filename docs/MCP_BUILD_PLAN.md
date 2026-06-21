@@ -8,9 +8,19 @@ workflows live in `docs/MCP_MANUAL.md`.
 
 ## Architecture
 
-One `dosbox-x` process, built `--enable-mcp` (implies `C_DEBUG`), launched **headless**
-(`SDL_VIDEODRIVER=dummy` + `SDL_AUDIODRIVER=dummy`; not `-silent`, which also exits) by a
-repeatable launcher script. Inside it:
+One `dosbox-x` process, built `--enable-mcp` (implies `C_DEBUG`), launched by a repeatable
+launcher script in one of two **launch modes** (a runtime choice, not a build difference —
+the same binary):
+
+- **headless** (default, used by `scripts/mcp-check.sh` and CI): `SDL_VIDEODRIVER=dummy` +
+  `SDL_AUDIODRIVER=dummy` (not `-silent`, which also exits). No window, no display/tty needed,
+  fully scriptable.
+- **visible** (interactive RE sessions): the dummy drivers are **not** set, so a real SDL
+  window opens and you can watch the guest. Under WSL2 this renders via WSLg. The MCP server,
+  tools, and dispatcher are identical to headless — the screen tools (`read_screen`,
+  `screen_hash`, `take_screenshot`) and input injection work the same way regardless of mode.
+
+Inside the process:
 
 - a **TCP JSON-RPC server thread** that only enqueues requests and waits for replies;
 - an **emulator-thread dispatcher** that drains the queue at **two service points** so all
@@ -55,9 +65,12 @@ The bounding helper enforces these; tests assert against them, not ad-hoc per-sl
 - **breakpoint / scan list:** max **256** entries per page.
 - **debugger_command passthrough:** captured output truncated to **16 KiB**.
 
-## Headless: no ncurses TUI in MCP mode
+## No ncurses TUI in MCP mode (either launch mode)
 
-In `--enable-mcp` headless mode, **do not initialize ncurses** — skip `DEBUG_SetupConsole()`
+This is keyed on `--enable-mcp`, not the launch mode: the debugger's ncurses TUI is skipped in
+**both** headless and visible launches (visible only adds the SDL *guest* window; the MCP queue,
+not the TUI, is always the debugger input source). In `--enable-mcp` mode, **do not initialize
+ncurses** — skip `DEBUG_SetupConsole()`
 (`debug.cpp:5790`, the sole `initscr()` path via `DBGUI_StartUp`) so `dbg.win_main` stays `NULL`. Every
 draw routine already null-guards on `dbg.win_main` (`DrawData` `debug.cpp:1005`, `DrawRegisters` `:1146`,
 `DrawCode` `:1303`, `DrawInput`/`DrawVariables` `debug_gui.cpp:358/427`), so they become no-ops; the debug
@@ -213,10 +226,17 @@ metadata** (never raw pixels).
 
 ## Slice 12 — Lifecycle: launcher + `reset` / `quit`
 **Goal:** repeatable game launch + in-session lifecycle.
-**Changes:** finalize the launcher script (mount + config via `-set`/`-c` or `[autoexec]`, dummy env,
-`--enable-debug`, optional `-break-start`, MCP server listening); in-session `reset` / `quit` tools.
-**Tests:** integration — launch a known target by name and confirm it reaches a known state.
-**DoD:** `mcp-check.sh` green.
+**Changes:** finalize the launcher script (mount + config via `-set`/`-c` or `[autoexec]`,
+`--enable-debug`, optional `-break-start`, MCP server listening). The launcher takes a **launch
+mode** flag (default `headless`, opt-in `visible`): `headless` exports `SDL_VIDEODRIVER=dummy` +
+`SDL_AUDIODRIVER=dummy`; `visible` leaves them unset so a real SDL window opens (WSLg under WSL2).
+Both modes share the same binary, MCP server, and target/config args — mode only toggles the SDL
+driver env. In-session `reset` / `quit` tools.
+**Tests:** integration — launch a known target by name in **headless** mode and confirm it reaches
+a known state (CI path). Visible mode is the same code path with the driver env unset, so it needs
+no separate CI assertion (CI has no display); a scripted smoke check that the launcher accepts the
+flag and sets/unsets the env vars is enough.
+**DoD:** `mcp-check.sh` green; visible mode documented in `docs/MCP_MANUAL.md`.
 
 ## Slice 13 — Manual finalize + optional command passthrough
 **Goal:** living manual complete; optional escape hatch.

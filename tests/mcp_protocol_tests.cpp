@@ -142,12 +142,12 @@ TEST(Mcp, DispatchModeMismatchCarriesCurrentState)
     EXPECT_EQ(err->find("code")->asInt(), MCP_ERR_MODE_MISMATCH);
     EXPECT_EQ(err->find("data")->find("state")->asString(), "running");
 
-    // A parked-class request whose handler is not yet implemented (write_register
-    // arrives in Slice 7) succeeds the mode check while parked, so it reports
+    // A parked-class request whose handler is not yet implemented (scan_start
+    // arrives in Slice 11) succeeds the mode check while parked, so it reports
     // not-implemented rather than a mismatch. (Must be a method whose handler is
     // still a stub: dispatching an *implemented* state-touching tool here would
     // invoke the real emulator-state bridge — not what this pure test wants.)
-    std::string line2 = dispatch("write_register", Json::object(), Json::integer(5), STATE_PARKED);
+    std::string line2 = dispatch("scan_start", Json::object(), Json::integer(5), STATE_PARKED);
     Json r2;
     ASSERT_TRUE(Json::parse(line2, r2));
     ASSERT_NE(r2.find("error"), nullptr);
@@ -690,6 +690,174 @@ TEST(Mcp, BreakpointClassification)
     EXPECT_EQ(classify("breakpoint_add"), CLS_PARKED);
     EXPECT_EQ(classify("breakpoint_delete"), CLS_PARKED);
     EXPECT_FALSE(mode_matches(CLS_PARKED, STATE_RUNNING)); // rejected while running
+    EXPECT_TRUE(mode_matches(CLS_PARKED, STATE_PARKED));
+}
+
+// -- writes (Slice 7) ------------------------------------------------------
+
+static Json parse_params(const char *json)
+{
+    Json p;
+    EXPECT_TRUE(Json::parse(json, p)) << json;
+    return p;
+}
+
+TEST(Mcp, ParseRegWriteUppercasesAndAcceptsHexOrInt)
+{
+    RegWriteRequest req;
+    std::string err;
+    // lower-case name is upper-cased; value as a hex string
+    ASSERT_TRUE(parse_reg_write_request(
+        parse_params("{\"register\":\"eax\",\"value\":\"0x1234\"}"), req, err)) << err;
+    EXPECT_EQ(req.reg, "EAX");
+    EXPECT_EQ(req.value, 0x1234u);
+
+    // value as a JSON integer
+    ASSERT_TRUE(parse_reg_write_request(
+        parse_params("{\"register\":\"BX\",\"value\":513}"), req, err)) << err;
+    EXPECT_EQ(req.reg, "BX");
+    EXPECT_EQ(req.value, 513u);
+}
+
+TEST(Mcp, ParseRegWriteRejectsBadInput)
+{
+    RegWriteRequest req;
+    std::string err;
+    EXPECT_FALSE(parse_reg_write_request(parse_params("{\"value\":1}"), req, err));
+    EXPECT_FALSE(parse_reg_write_request(parse_params("{\"register\":\"\",\"value\":1}"), req, err));
+    EXPECT_FALSE(parse_reg_write_request(parse_params("{\"register\":\"eax\"}"), req, err));
+    EXPECT_FALSE(parse_reg_write_request(parse_params("{\"register\":5,\"value\":1}"), req, err));
+}
+
+TEST(Mcp, FormatRegWrite)
+{
+    RegWriteRequest req; req.reg = "EAX"; req.value = 0xdeadbeef;
+    Json r = format_reg_write(req, true);
+    EXPECT_TRUE(r.find("written")->asBool());
+    EXPECT_EQ(r.find("register")->asString(), "EAX");
+    EXPECT_EQ(r.find("value")->asString(), "0xdeadbeef");
+}
+
+TEST(Mcp, ParseMemWriteDefaultsAndSpaces)
+{
+    MemWriteRequest req;
+    std::string err;
+    // segmented, default width 1
+    ASSERT_TRUE(parse_mem_write_request(
+        parse_params("{\"seg\":\"0x40\",\"off\":\"0x6c\",\"values\":[1,\"0x02\",255]}"),
+        req, err)) << err;
+    EXPECT_EQ(req.space, SPACE_SEGMENTED);
+    EXPECT_EQ(req.seg, 0x40);
+    EXPECT_EQ(req.off, 0x6cu);
+    EXPECT_EQ(req.width, 1);
+    ASSERT_EQ(req.values.size(), 3u);
+    EXPECT_EQ(req.values[0], 1u);
+    EXPECT_EQ(req.values[1], 2u);
+    EXPECT_EQ(req.values[2], 255u);
+
+    // virtual with explicit width
+    ASSERT_TRUE(parse_mem_write_request(
+        parse_params("{\"space\":\"virtual\",\"lin\":\"0xb8000\",\"width\":2,\"values\":[\"0x0741\"]}"),
+        req, err)) << err;
+    EXPECT_EQ(req.space, SPACE_VIRTUAL);
+    EXPECT_EQ(req.off, 0xb8000u);
+    EXPECT_EQ(req.width, 2);
+
+    // physical, width 4
+    ASSERT_TRUE(parse_mem_write_request(
+        parse_params("{\"space\":\"physical\",\"phys\":\"0x500\",\"width\":4,\"values\":[\"0x12345678\"]}"),
+        req, err)) << err;
+    EXPECT_EQ(req.space, SPACE_PHYSICAL);
+    EXPECT_EQ(req.width, 4);
+}
+
+TEST(Mcp, ParseMemWriteRejectsBadInput)
+{
+    MemWriteRequest req;
+    std::string err;
+    // missing values
+    EXPECT_FALSE(parse_mem_write_request(
+        parse_params("{\"seg\":0,\"off\":0}"), req, err));
+    // empty values
+    EXPECT_FALSE(parse_mem_write_request(
+        parse_params("{\"seg\":0,\"off\":0,\"values\":[]}"), req, err));
+    // bad width
+    EXPECT_FALSE(parse_mem_write_request(
+        parse_params("{\"seg\":0,\"off\":0,\"width\":3,\"values\":[1]}"), req, err));
+    // unknown space
+    EXPECT_FALSE(parse_mem_write_request(
+        parse_params("{\"space\":\"flat\",\"seg\":0,\"off\":0,\"values\":[1]}"), req, err));
+    // bad element in values array
+    EXPECT_FALSE(parse_mem_write_request(
+        parse_params("{\"seg\":0,\"off\":0,\"values\":[\"zz\"]}"), req, err));
+}
+
+TEST(Mcp, ParseMemWriteEnforcesByteCap)
+{
+    MemWriteRequest req;
+    std::string err;
+    // values * width must not exceed MCP_READMEM_MAX (4096). width 4 ->
+    // MCP_READMEM_MAX/4 dwords is the most we accept; one more is rejected.
+    Json p = Json::object();
+    p.set("seg", Json::integer(0));
+    p.set("off", Json::integer(0));
+    p.set("width", Json::integer(4));
+    Json vals = Json::array();
+    for (size_t i = 0; i < (MCP_READMEM_MAX / 4) + 1; i++) vals.push(Json::integer(0));
+    p.set("values", vals);
+    EXPECT_FALSE(parse_mem_write_request(p, req, err));
+
+    // exactly at the cap is accepted
+    Json ok = Json::object();
+    ok.set("seg", Json::integer(0));
+    ok.set("off", Json::integer(0));
+    ok.set("width", Json::integer(4));
+    Json vals2 = Json::array();
+    for (size_t i = 0; i < (MCP_READMEM_MAX / 4); i++) vals2.push(Json::integer(0));
+    ok.set("values", vals2);
+    EXPECT_TRUE(parse_mem_write_request(ok, req, err)) << err;
+}
+
+TEST(Mcp, FormatMemWriteVariants)
+{
+    MemWriteRequest req;
+    req.space = SPACE_SEGMENTED; req.seg = 0x40; req.off = 0x6c; req.width = 1;
+    MemWriteResult out;
+    out.addr_valid = true; out.addr = 0x46c; out.written = 3; out.bytes = 3; out.fault = false;
+    Json r = format_mem_write(req, out);
+    EXPECT_EQ(r.find("space")->asString(), "segmented");
+    EXPECT_EQ(r.find("seg")->asString(), "0x0040");
+    EXPECT_EQ(r.find("off")->asString(), "0x0000006c");
+    EXPECT_EQ(r.find("addr")->asString(), "0x0000046c");
+    EXPECT_EQ(r.find("width")->asInt(), 1);
+    EXPECT_EQ(r.find("written")->asInt(), 3);
+    EXPECT_EQ(r.find("bytes")->asInt(), 3);
+    EXPECT_FALSE(r.find("fault")->asBool());
+
+    // physical, with a fault partway and no addr field for unresolved? physical
+    // always resolves; show the fault + partial counts.
+    MemWriteRequest pq;
+    pq.space = SPACE_PHYSICAL; pq.seg = 0; pq.off = 0x500; pq.width = 4;
+    MemWriteResult po;
+    po.addr_valid = true; po.addr = 0x500; po.written = 1; po.bytes = 4; po.fault = false;
+    Json pr = format_mem_write(pq, po);
+    EXPECT_EQ(pr.find("space")->asString(), "physical");
+    EXPECT_EQ(pr.find("phys")->asString(), "0x00000500");
+    EXPECT_TRUE(pr.find("seg") == nullptr);
+
+    // unresolved segmented selector: addr_valid false, no addr field
+    MemWriteResult bad;
+    bad.addr_valid = false; bad.addr = 0; bad.written = 0; bad.bytes = 0; bad.fault = false;
+    Json br = format_mem_write(req, bad);
+    EXPECT_FALSE(br.find("addr_valid")->asBool());
+    EXPECT_TRUE(br.find("addr") == nullptr);
+}
+
+TEST(Mcp, WriteClassification)
+{
+    EXPECT_EQ(classify("write_register"), CLS_PARKED);
+    EXPECT_EQ(classify("write_memory"), CLS_PARKED);
+    EXPECT_FALSE(mode_matches(CLS_PARKED, STATE_RUNNING));
     EXPECT_TRUE(mode_matches(CLS_PARKED, STATE_PARKED));
 }
 

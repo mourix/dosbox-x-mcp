@@ -280,6 +280,75 @@ int  bp_add(const BpAddRequest &req);
 bool bp_delete(int index);
 void bp_list(std::vector<BreakpointInfo> &out);
 
+/* ---- writes (Slice 7) ----------------------------------------------------
+ *
+ * write_register / write_memory. Same reader/formatter split as the read slices,
+ * mirroring the debugger's own SR / SM commands: the param parsing and JSON
+ * formatting are pure (here / mcp_protocol.cpp, unit-tested with no boot), while
+ * the actual mutation lives in the bridges. write_register reuses the debugger's
+ * ChangeRegister (mcp_registers.cpp), inheriting its longest-name-first register
+ * ordering and per-register width masking; write_memory reuses GetAddress +
+ * mem_write{b,w,d}_checked / physdev_write{b,w,d} (mcp_memory.cpp), the exact
+ * primitives the SM/SMV/SMP commands use. Both tools are parked-class. No core
+ * edits: both bridges declare existing globals, like the read bridges. */
+
+/* A parsed write_register request. `reg` is the (upper-cased) register name as
+ * ChangeRegister understands it; `value` is masked to the register's width by
+ * ChangeRegister itself. */
+struct RegWriteRequest {
+    std::string reg;
+    uint32_t    value;
+};
+
+/* Pure: parse params (`register` string + `value` int/hex-string). Returns false
+ * and sets err on a missing/invalid field. */
+bool parse_reg_write_request(const Json &params, RegWriteRequest &req, std::string &err);
+
+/* Pure: format the outcome of a register write as compact JSON. */
+Json format_reg_write(const RegWriteRequest &req, bool ok);
+
+/* Bridge (mcp_registers.cpp): write the register via the debugger's ChangeRegister.
+ * Returns false if the register name was not recognised. Runs on the emulator
+ * thread while parked. */
+bool write_register(const RegWriteRequest &req);
+
+/* A parsed, already-bounds-checked write_memory request. Address fields mirror
+ * read_memory (segmented seg:off / virtual lin / physical phys). Each value in
+ * `values` is written at successive `width`-byte slots (width ∈ {1,2,4}); the
+ * total byte count is capped at MCP_READMEM_MAX so a write does no more work than
+ * a max read. */
+struct MemWriteRequest {
+    AddrSpace             space;
+    uint16_t              seg;
+    uint32_t              off;     /* off / lin / phys */
+    int                   width;   /* 1, 2 or 4 */
+    std::vector<uint32_t> values;
+};
+
+/* Filled by the bridge. `addr_valid` is false only when a SPACE_SEGMENTED
+ * selector does not resolve. `written` is the count of values actually written
+ * (it stops early on a faulting/unmapped slot, with `fault` set); `bytes` is the
+ * byte total written. */
+struct MemWriteResult {
+    bool     addr_valid;
+    uint64_t addr;
+    size_t   written;
+    size_t   bytes;
+    bool     fault;
+};
+
+/* Pure: parse params (space + addr fields like read_memory, `width` default 1,
+ * required non-empty `values` array of ints/hex-strings). Returns false and sets
+ * err on a missing/invalid field or when values·width exceeds MCP_READMEM_MAX. */
+bool parse_mem_write_request(const Json &params, MemWriteRequest &req, std::string &err);
+
+/* Pure: format the outcome of a memory write as compact JSON. */
+Json format_mem_write(const MemWriteRequest &req, const MemWriteResult &out);
+
+/* Bridge (mcp_memory.cpp): write the values into the requested space. Runs on the
+ * emulator thread while parked. */
+void write_memory(const MemWriteRequest &req, MemWriteResult &out);
+
 /* Pure dispatch: given a parsed request and the current execution state, return
  * the full response line. Handles unknown methods, mode-mismatch fast-reject,
  * and the ping / server_info handlers. State-touching handlers (later slices)

@@ -59,6 +59,12 @@ void Json::push(const Json &v) {
     arr_.push_back(v);
 }
 
+const Json &Json::at(size_t i) const {
+    static const Json kNull;
+    if (t_ != Array || i >= arr_.size()) return kNull;
+    return arr_[i];
+}
+
 // -- serialize -------------------------------------------------------------
 
 void Json::encodeString(const std::string &s, std::string &o) {

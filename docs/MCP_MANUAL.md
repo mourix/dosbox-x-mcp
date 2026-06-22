@@ -8,9 +8,10 @@ themselves (the single source of truth) — this manual does not duplicate schem
 > Status: **early.** The transport is live (Slice 2): a TCP JSON-RPC server with
 > `ping` / `server_info`. State-touching tools landed so far: `read_registers` (Slice 3),
 > `read_memory` + `disassemble` (Slice 4), execution control `step` / `step_over` /
-> `continue` / `break` (Slice 5), and breakpoints `breakpoint_list` / `breakpoint_add` /
-> `breakpoint_delete` (Slice 6). Remaining tools land in later slices. Keep workflows here
-> in sync with the implemented tools; update on every feature.
+> `continue` / `break` (Slice 5), breakpoints `breakpoint_list` / `breakpoint_add` /
+> `breakpoint_delete` (Slice 6), and writes `write_register` / `write_memory` (Slice 7).
+> Remaining tools land in later slices. Keep workflows here in sync with the implemented
+> tools; update on every feature.
 
 ## Build flag
 
@@ -73,7 +74,8 @@ If you send a parked-class tool while running (or vice-versa) you get the `-3200
 mismatch error telling you the current state; switch with `break` / `continue` first.
 (Implemented so far: the `any`-class `ping` / `server_info`; the parked-class
 `read_registers`, `read_memory`, `disassemble`, `step`, `step_over`, `continue`,
-`breakpoint_list`, `breakpoint_add`, `breakpoint_delete`; and the run-class `break`. The
+`write_register`, `write_memory`, `breakpoint_list`, `breakpoint_add`,
+`breakpoint_delete`; and the run-class `break`. The
 remaining tools are already classified so mismatches are reported correctly, but their
 handlers land in later slices.)
 
@@ -171,6 +173,23 @@ parked → inspect**.
 - **`breakpoint_delete`** removes one by `index`, or all with `all: true`; replies
   `{deleted: <bool>, …}`. Because indices shift on every add/delete, **re-`breakpoint_list`
   before deleting by index** rather than caching an index across mutations.
+
+### Writing state
+Two **parked**-class tools mutate guest state (they mirror the debugger's `SR` / `SM`
+commands). Always read back to confirm — `read_registers` / `read_memory`.
+
+- **`write_register`** takes `register` (name, any case — `eax`, `AX`, `cs`, `zf`, …) and
+  `value` (hex string or int). The write goes through the debugger's register matcher, so a
+  narrow name only touches its bits: writing `AX` leaves the high half of `EAX` intact.
+  Replies `{written: true, register, value}`; an unknown register name fails with `-32602`.
+- **`write_memory`** takes an address like `read_memory` (`space` = `segmented` (default,
+  `seg`+`off`) | `virtual` (`lin`) | `physical` (`phys`)), an optional `width` (1 (default),
+  2 or 4 bytes per value), and a required non-empty `values` array (hex strings or ints).
+  Values are written at successive `width`-byte slots and stored little-endian, so
+  `width: 2, values: [0x1234]` writes the bytes `34 12`. Replies `{addr, width, written,
+  bytes, fault}`; `fault: true` means a write hit unmapped/write-protected memory and the
+  write stopped early (`written`/`bytes` are the partial counts). The total byte count is
+  capped at 4096 — a larger request is rejected with `-32602`, not truncated.
 
 ### Typical reverse-engineering loop
 _TODO: load target → break at entry → step → inspect → map behavior → record findings._

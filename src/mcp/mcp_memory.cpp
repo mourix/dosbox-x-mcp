@@ -1,15 +1,17 @@
 /*
- *  DOSBox-X MCP — emulator-state bridge for read_memory + disassemble (Slice 4).
+ *  DOSBox-X MCP — emulator-state bridge for read_memory + disassemble (Slice 4)
+ *  and write_memory (Slice 7).
  *
- *  The single place these two tools touch core emulator memory. Like the Slice 3
- *  register bridge, it only *reads* — the param parsing and JSON formatting live
- *  in the pure protocol layer (mcp_protocol.cpp) and are unit-tested without a
- *  boot. No core files are edited: this reuses the same primitives the debugger's
- *  data/code views use —
+ *  The single place these tools touch core emulator memory. The reads (Slice 4)
+ *  mirror the debugger's data/code views; the write (Slice 7) mirrors its
+ *  SM/SMV/SMP commands. The param parsing and JSON formatting live in the pure
+ *  protocol layer (mcp_protocol.cpp) and are unit-tested without a boot. No core
+ *  files are edited: this reuses the same primitives those commands use —
  *
  *    GetAddress()        (debug.cpp:445)  selector/offset -> linear address;
  *    mem_readb_checked() (paging.h:486)   linear read, false == success;
- *    physdev_readb()     (mem.h:346)      physical-bus read;
+ *    mem_write{b,w,d}_checked() (paging.h:514) linear write, true == fault;
+ *    physdev_read/writeb() (mem.h:346)    physical-bus access;
  *    DasmI386()          (debug_disasm.cpp:1317) x86 disassembler.
  *
  *  so it adds nothing to the core-edit manifest. Must run on the emulator thread
@@ -80,6 +82,50 @@ void read_memory(const MemReadRequest &req, MemReadResult &out) {
         bool ok = !mem_readb_checked((LinearPt)((uint64_t)req.off + i), &v);
         out.bytes.push_back(ok ? v : 0);
         out.readable.push_back(ok);
+    }
+}
+
+void write_memory(const MemWriteRequest &req, MemWriteResult &out) {
+    out.addr_valid = true;
+    out.addr = 0;
+    out.written = 0;
+    out.bytes = 0;
+    out.fault = false;
+
+    if (req.space == SPACE_SEGMENTED) {
+        uint64_t base = GetAddress(req.seg, req.off);
+        if (base == MCP_NO_ADDRESS) { out.addr_valid = false; return; }
+        out.addr = base;
+    } else {
+        out.addr = req.off; /* virtual = linear; physical = physical addr */
+    }
+
+    for (size_t i = 0; i < req.values.size(); i++) {
+        uint32_t off = req.off + (uint32_t)(i * (size_t)req.width);
+        uint32_t v   = req.values[i];
+
+        if (req.space == SPACE_PHYSICAL) {
+            /* physdev_write* are void (open-bus writes are dropped silently). */
+            if (req.width == 4)      physdev_writed((PhysPt64)((uint64_t)off), v);
+            else if (req.width == 2) physdev_writew((PhysPt64)((uint64_t)off), (uint16_t)v);
+            else                     physdev_writeb((PhysPt64)((uint64_t)off), (uint8_t)v);
+        } else {
+            uint64_t a;
+            if (req.space == SPACE_SEGMENTED) {
+                a = GetAddress(req.seg, off);          /* resolve per slot, like read_memory */
+                if (a == MCP_NO_ADDRESS) { out.fault = true; break; }
+            } else {
+                a = off;                               /* SPACE_VIRTUAL: linear directly */
+            }
+            /* mem_write*_checked return true on a page fault / write-protect. */
+            bool fault = (req.width == 4) ? mem_writed_checked((LinearPt)a, v)
+                       : (req.width == 2) ? mem_writew_checked((LinearPt)a, (uint16_t)v)
+                                          : mem_writeb_checked((LinearPt)a, (uint8_t)v);
+            if (fault) { out.fault = true; break; }
+        }
+
+        out.written++;
+        out.bytes += (size_t)req.width;
     }
 }
 

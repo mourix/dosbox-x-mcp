@@ -53,8 +53,11 @@ public:
     const Json *find(const std::string &key) const; /* nullptr if absent */
     bool has(const std::string &key) const { return find(key) != nullptr; }
 
-    /* Array helper. */
+    /* Array helpers. size()/at() return 0 / a static null on non-arrays or an
+     * out-of-range index, so callers can iterate after an isArray() check. */
     void push(const Json &v);
+    size_t      size() const { return t_ == Array ? arr_.size() : 0; }
+    const Json &at(size_t i) const;
 
     /* Encode to a compact JSON string (no whitespace). */
     std::string serialize() const;

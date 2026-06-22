@@ -287,6 +287,31 @@ fall-through search) and an `INT 10h` breakpoint stops it during POST; wired int
 **Tests:** integration — write then read back register and memory.
 **DoD:** `mcp-check.sh` green.
 
+**Outcome (resolved):** ✅ Shipped. Same reader/formatter split as the read slices, mirroring the
+debugger's own `SR`/`SM` commands. **No core edits** — both bridges reuse existing globals exactly like
+the read bridges (Slice 3/4), so the core-edit manifest is unchanged. `write_register`
+(`src/mcp/mcp_registers.cpp`) hands the upper-cased `"<REG> <value>"` to the debugger's **`ChangeRegister`**
+(external-linkage global, declared in the bridge), inheriting its longest-name-first matching and
+per-register width masking (a 16-bit write leaves the high half of the dword intact); an unrecognised name
+returns `-32602`. `write_memory` (`src/mcp/mcp_memory.cpp`) resolves the three address spaces like
+`read_memory` — segmented via per-slot `GetAddress`, virtual = linear, physical via `physdev_write*` — and
+writes width-1/2/4 values through `mem_write{b,w,d}_checked` (true == fault: it stops early and reports
+`fault:true` + the partial `written`/`bytes` counts). Param parsing (`parse_reg_write_request`/
+`parse_mem_write_request`, value as JSON int or hex string, `values` array, `width`∈{1,2,4}) and JSON
+formatting (`format_reg_write`/`format_mem_write`) are pure in `mcp_protocol.cpp`; both tools are
+parked-class. The write byte total is capped at `MCP_READMEM_MAX` (4096) — a write does no more work than a
+max read — and an over-cap request is **rejected** (`-32602`), not silently clamped, so no partial write
+surprises the caller. A small read accessor (`Json::size`/`Json::at`) was added to the MCP-private JSON value
+to iterate the `values` array (isolated, not a core edit). Unit tests: `tests/mcp_protocol_tests.cpp`
+(`Mcp.ParseRegWrite*`, `Mcp.FormatRegWrite`, `Mcp.ParseMemWrite*`, `Mcp.FormatMemWriteVariants`,
+`Mcp.WriteClassification`) cover name upper-casing, int/hex values, the byte-cap boundary, space variants,
+bad-input rejection, formatting of each space + the unresolved-selector case, and classification.
+Integration: `scripts/mcp_slice7_writes.py` boots headless with `-break-start`, writes EAX then a 16-bit AX
+(asserting the high half survives), rejects an unknown register, byte-writes `de ad be ef` to a scratch
+RAM region and reads it back, proves width-2 little-endian storage and that a `virtual`-space write is seen
+through the `segmented` space, and asserts the bad-param rejections; wired into `scripts/mcp-check.sh`
+(integration test #7).
+
 ## Slice 8 — Input injection: `send_keys` / `type_text` / `mouse`
 **Goal:** drive the guest while it runs (serviced at the frame tick).
 **Changes:** `send_keys` = `KEYBOARD_AddKey(KBD_KEYS, press/release)` pairs; `type_text` =

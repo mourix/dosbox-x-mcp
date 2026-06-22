@@ -1,12 +1,17 @@
 /*
  *  DOSBox-X MCP — emulator-state bridge for read_registers (Slice 3).
  *
- *  The single place the register tool touches core emulator globals
- *  (cpu_regs / Segs / cpu, via include/regs.h + include/cpu.h). It only *reads*
- *  them into a plain RegisterSnapshot; the formatting lives in the pure protocol
+ *  The single place the register tools touch core emulator globals
+ *  (cpu_regs / Segs / cpu, via include/regs.h + include/cpu.h). read_registers
+ *  only *reads* them into a plain RegisterSnapshot; write_register (Slice 7)
+ *  delegates to the debugger's own ChangeRegister so it inherits the exact
+ *  longest-name-first register matching and per-register width masking the
+ *  debugger's SR command uses. The formatting/parsing live in the pure protocol
  *  layer (mcp_protocol.cpp). No core files are edited — this reuses the same
- *  globals/macros the debugger's DrawRegisters reads (debug.cpp:1146), so it adds
- *  nothing to the core-edit manifest. Must run on the emulator thread while parked.
+ *  globals/macros the debugger's DrawRegisters reads (debug.cpp:1146) and the
+ *  ChangeRegister global (debug.cpp:1728, external linkage, declared below like
+ *  the GetAddress/DasmI386 globals in mcp_memory.cpp), so it adds nothing to the
+ *  core-edit manifest. Must run on the emulator thread while parked.
  *
  *  Compiled only under --enable-mcp; see docs/MCP_BUILD_PLAN.md.
  */
@@ -18,6 +23,13 @@
 #include "dosbox.h"
 #include "regs.h"
 #include "cpu.h"
+
+#include <cstdio>
+
+/* Defined in src/debug/debug.cpp (external linkage, not in any installed header).
+ * Parses "<REG> <value>" assignments and applies them, returning false if the
+ * register name is not recognised. */
+extern bool ChangeRegister(char* const str);
 
 namespace mcp {
 
@@ -44,6 +56,16 @@ void snapshot_registers(RegisterSnapshot &s) {
     s.code_big = cpu.code.big;
     s.vm86     = (reg_flags & FLAG_VM) != 0;
     s.cpl      = (unsigned)cpu.cpl;
+}
+
+bool write_register(const RegWriteRequest &req) {
+    /* Hand ChangeRegister exactly what the SR command would: the register name
+     * followed by the value. A space separates them (GetHexValue skips it), and
+     * the value is plain hex (GetHexValue auto-detects the base). ChangeRegister
+     * returns false for an unrecognised register name. */
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s %X", req.reg.c_str(), (unsigned)req.value);
+    return ChangeRegister(buf);
 }
 
 } // namespace mcp

@@ -104,6 +104,9 @@ python3 scripts/mcp_slice5_exec.py || fail "integration test #5 (execution contr
 log "running integration test #6: breakpoints (Slice 6)"
 python3 scripts/mcp_slice6_breakpoints.py || fail "integration test #6 (breakpoints) failed"
 
+log "running integration test #7: writes (Slice 7)"
+python3 scripts/mcp_slice7_writes.py || fail "integration test #7 (writes) failed"
+
 # 4. Isolation proof: the core must still build with the flag OFF.
 if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
     build

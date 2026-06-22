@@ -7,6 +7,7 @@
 
 #if C_MCP
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -485,6 +486,104 @@ Json format_breakpoint_list(const std::vector<BreakpointInfo> &bps, size_t max) 
     return r;
 }
 
+// -- writes (Slice 7) ------------------------------------------------------
+
+bool parse_reg_write_request(const Json &params, RegWriteRequest &req, std::string &err) {
+    const Json *r = params.find("register");
+    if (r == nullptr || !r->isString()) { err = "missing/invalid register"; return false; }
+    req.reg = r->asString();
+    if (req.reg.empty()) { err = "register must be non-empty"; return false; }
+    /* Upper-case so the (case-sensitive) ChangeRegister matcher recognises it. */
+    for (size_t i = 0; i < req.reg.size(); i++)
+        req.reg[i] = (char)std::toupper((unsigned char)req.reg[i]);
+    if (!json_to_u32(params.find("value"), req.value)) { err = "missing/invalid value"; return false; }
+    return true;
+}
+
+Json format_reg_write(const RegWriteRequest &req, bool ok) {
+    Json r = Json::object();
+    r.set("written", Json::boolean(ok));
+    r.set("register", Json::str(req.reg));
+    /* The value is masked to the register width by ChangeRegister; echo the
+     * requested value (read_registers confirms the stored result). */
+    r.set("value", Json::str(hex(req.value, 8)));
+    return r;
+}
+
+bool parse_mem_write_request(const Json &params, MemWriteRequest &req, std::string &err) {
+    req.space = SPACE_SEGMENTED;
+    req.seg = 0; req.off = 0;
+
+    const Json *spc = params.find("space");
+    if (spc != nullptr) {
+        if (!spc->isString()) { err = "space must be a string"; return false; }
+        const std::string &s = spc->asString();
+        if      (s == "segmented") req.space = SPACE_SEGMENTED;
+        else if (s == "virtual")   req.space = SPACE_VIRTUAL;
+        else if (s == "physical")  req.space = SPACE_PHYSICAL;
+        else { err = "unknown space (want segmented|virtual|physical): " + s; return false; }
+    }
+
+    if (req.space == SPACE_SEGMENTED) {
+        uint32_t seg;
+        if (!json_to_u32(params.find("seg"), seg)) { err = "missing/invalid seg"; return false; }
+        req.seg = (uint16_t)seg;
+        if (!json_to_u32(params.find("off"), req.off)) { err = "missing/invalid off"; return false; }
+    } else if (req.space == SPACE_VIRTUAL) {
+        if (!json_to_u32(params.find("lin"), req.off)) { err = "missing/invalid lin"; return false; }
+    } else {
+        if (!json_to_u32(params.find("phys"), req.off)) { err = "missing/invalid phys"; return false; }
+    }
+
+    req.width = 1;
+    if (params.has("width")) {
+        uint32_t w;
+        if (!json_to_u32(params.find("width"), w) || (w != 1 && w != 2 && w != 4)) {
+            err = "width must be 1, 2 or 4"; return false;
+        }
+        req.width = (int)w;
+    }
+
+    const Json *vals = params.find("values");
+    if (vals == nullptr || !vals->isArray() || vals->size() == 0) {
+        err = "missing/empty values array"; return false;
+    }
+    if (vals->size() * (size_t)req.width > MCP_READMEM_MAX) {
+        err = "too many values (bytes exceed cap)"; return false;
+    }
+    req.values.clear();
+    req.values.reserve(vals->size());
+    for (size_t i = 0; i < vals->size(); i++) {
+        uint32_t v;
+        if (!json_to_u32(&vals->at(i), v)) { err = "invalid value in values array"; return false; }
+        req.values.push_back(v);
+    }
+    return true;
+}
+
+Json format_mem_write(const MemWriteRequest &req, const MemWriteResult &out) {
+    Json r = Json::object();
+    const char *space = req.space == SPACE_SEGMENTED ? "segmented" :
+                        req.space == SPACE_VIRTUAL   ? "virtual" : "physical";
+    r.set("space", Json::str(space));
+    if (req.space == SPACE_SEGMENTED) {
+        r.set("seg", Json::str(hex(req.seg, 4)));
+        r.set("off", Json::str(hex(req.off, 8)));
+    } else if (req.space == SPACE_VIRTUAL) {
+        r.set("lin", Json::str(hex(req.off, 8)));
+    } else {
+        r.set("phys", Json::str(hex(req.off, 8)));
+    }
+    r.set("addr_valid", Json::boolean(out.addr_valid));
+    if (out.addr_valid)
+        r.set("addr", Json::str(hex((uint32_t)out.addr, 8)));
+    r.set("width", Json::integer((long long)req.width));
+    r.set("written", Json::integer((long long)out.written));
+    r.set("bytes", Json::integer((long long)out.bytes));
+    r.set("fault", Json::boolean(out.fault));
+    return r;
+}
+
 std::string dispatch(const std::string &method, const Json &params,
                      const Json &id, ExecState state) {
     (void)params;
@@ -579,6 +678,29 @@ std::string dispatch(const std::string &method, const Json &params,
         if (all) r.set("all", Json::boolean(true));
         else     r.set("index", Json::integer((long long)index));
         return enforce_max_payload(id, make_result(id, r));
+    }
+
+    if (method == "write_register") {
+        /* Parked-class: mode_matches guaranteed STATE_PARKED above. */
+        RegWriteRequest req;
+        std::string perr;
+        if (!parse_reg_write_request(params, req, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        bool ok = write_register(req);
+        if (!ok)
+            return make_error(id, MCP_ERR_INVALID_PARAMS, "unknown register: " + req.reg);
+        return enforce_max_payload(id, make_result(id, format_reg_write(req, ok)));
+    }
+    if (method == "write_memory") {
+        MemWriteRequest req;
+        std::string perr;
+        if (!parse_mem_write_request(params, req, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        MemWriteResult out;
+        write_memory(req, out);
+        if (!out.addr_valid)
+            return make_error(id, MCP_ERR_INVALID_PARAMS, "segmented selector did not resolve");
+        return enforce_max_payload(id, make_result(id, format_mem_write(req, out)));
     }
 
     /* Known method whose handler arrives in a later slice. */

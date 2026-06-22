@@ -6,9 +6,9 @@ authoritative reference for tool names and parameters is the MCP tool definition
 themselves (the single source of truth) — this manual does not duplicate schemas.
 
 > Status: **early.** The transport is live (Slice 2): a TCP JSON-RPC server with
-> `ping` / `server_info`. The first state-touching tool, `read_registers`, landed in
-> Slice 3. Remaining tools land in later slices. Keep workflows here in sync with the
-> implemented tools; update on every feature.
+> `ping` / `server_info`. State-touching tools landed so far: `read_registers` (Slice 3),
+> `read_memory` + `disassemble` (Slice 4). Remaining tools land in later slices. Keep
+> workflows here in sync with the implemented tools; update on every feature.
 
 ## Build flag
 
@@ -70,8 +70,8 @@ The emulator is either **running** (CPU free-running; the game executes) or **pa
 If you send a parked-class tool while running (or vice-versa) you get the `-32001`
 mismatch error telling you the current state; switch with `break` / `continue` first.
 (Implemented so far: the `any`-class `ping` / `server_info`, and the parked-class
-`read_registers`. The remaining tools are already classified so mismatches are reported
-correctly, but their handlers land in later slices.)
+`read_registers`, `read_memory`, `disassemble`. The remaining tools are already classified
+so mismatches are reported correctly, but their handlers land in later slices.)
 
 ## Mental model
 
@@ -94,8 +94,28 @@ object (`CF`,`PF`,`AF`,`ZF`,`SF`,`TF`,`IF`,`DF`,`OF`,`IOPL`), the CPU `mode`
 returns the `-32001` mismatch error — `break` first.
 
 ### Read memory / disassemble
-_TODO: read a memory window (seg:off or linear/physical), disassemble at an address,
-pagination conventions._
+Both are **parked**-class — `break` (or launch `-break-start`) first. Read in the address
+space you mean:
+
+- **`read_memory`** takes a `space` (`segmented` (default) | `virtual` | `physical`) and
+  the matching address (`seg`+`off`, `lin`, or `phys` — addresses accept either JSON
+  integers or hex strings like `"0xb8000"`) plus an optional `len` (default **256**, max
+  **4096** bytes per call). It returns the resolved `addr` (when `addr_valid`), the byte
+  count `len`, a lowercase `hex` dump (an unreadable/page-faulting byte renders as `??`,
+  counted in `unreadable`), and — when the request exceeds the per-call cap — `truncated:
+  true` plus a `next_off`/`next_lin`/`next_phys` to continue paging. The three spaces
+  agree: a `virtual` read at the `addr` a `segmented` read resolved returns the same bytes.
+  A protected-mode selector that does not resolve comes back `addr_valid: false` with an
+  empty dump.
+- **`disassemble`** takes `seg`+`off` (the starting CS:EIP) and an optional `count`
+  (default **16**, max **128** instructions) and an optional `big` (force 16/32-bit decode;
+  defaults to the current code-segment size). It returns an `insns` array — each with
+  `off`, resolved `addr`, raw `bytes`, and `text` — plus `truncated` when the count was
+  capped. Instruction offsets advance by their byte length, so page forward by re-issuing
+  from the last `off` + its byte count.
+
+Pagination convention: ask for a window, then continue from the returned `next_*` (memory)
+or the last instruction's offset (disasm) rather than requesting a huge range at once.
 
 ### Breakpoints and stepping
 _TODO: set/clear breakpoints, run-to-breakpoint, single-step, step-over, read state at

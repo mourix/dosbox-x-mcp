@@ -198,6 +198,25 @@ honoring the three address spaces (`DATV_SEGMENTED/VIRTUAL/PHYSICAL`), **paginat
 known opcode sequence.
 **DoD:** outputs bounded and asserted; `mcp-check.sh` green.
 
+**Outcome (resolved):** ✅ Shipped. Same reader/formatter split as Slice 3: the new
+emulator-state bridge `src/mcp/mcp_memory.cpp` only *reads* — `read_memory` resolves the three
+address spaces (segmented via per-byte `GetAddress`, virtual = linear directly, physical via
+`physdev_readb`) and reads through `mem_readb_checked` (false == success); `disassemble` loops
+`DasmI386` from `GetAddress(seg,eip)`, capturing raw bytes per instruction and advancing by the
+returned length (zero-length guard prevents an unbounded loop). Param parsing (`parse_mem_request`/
+`parse_disasm_request`, hex-or-int addresses, default/cap clamping) and JSON formatting
+(`format_memory`/`format_disasm`, lowercase hex dump with `??` for unreadable bytes, `truncated`+
+`next_*` pagination) are pure in `mcp_protocol.cpp`. The `read_memory`/`disassemble` handlers in
+`dispatch` are reached only when `STATE_PARKED`. **No core edits** — the bridge declares the
+existing `GetAddress`/`DasmI386` symbols and reuses `mem.h`/`paging.h`/`cpu.h`, so the core-edit
+manifest is unchanged. Unit tests: `tests/mcp_protocol_tests.cpp` (`Mcp.ParseMem*`, `Mcp.FormatMemory*`,
+`Mcp.ParseDisasm*`, `Mcp.FormatDisasm*`) cover defaults, cap clamping, space variants, bad-input
+rejection, the `??`/unreadable rendering, truncation/`next_off`, and the payload bound. Integration:
+`scripts/mcp_slice4_memory.py` boots headless with `-break-start`, asserts a segmented low-RAM read
+matches the same bytes via the virtual space, default page = 256, over-cap clamp to 4096 + `truncated`
++ `next_off`, bad-param `-32602`, and disassembles CS:EIP (offset sequencing + over-cap clamp to 128);
+wired into `scripts/mcp-check.sh` (integration test #4).
+
 ## Slice 5 — Execution control: `step` / `step_over` / `continue` / `break`
 **Goal:** drive execution.
 **Changes:** `step`=`DEBUG_Run(1,true)`; `step_over`=`StepOver()`+`DEBUG_Run(1,false)`;

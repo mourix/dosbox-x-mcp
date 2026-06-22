@@ -142,10 +142,10 @@ TEST(Mcp, DispatchModeMismatchCarriesCurrentState)
     EXPECT_EQ(err->find("code")->asInt(), MCP_ERR_MODE_MISMATCH);
     EXPECT_EQ(err->find("data")->find("state")->asString(), "running");
 
-    // A parked-class request whose handler is not yet implemented (read_memory
-    // arrives in Slice 4) succeeds the mode check while parked, so it reports
+    // A parked-class request whose handler is not yet implemented (step arrives
+    // in Slice 5) succeeds the mode check while parked, so it reports
     // not-implemented rather than a mismatch.
-    std::string line2 = dispatch("read_memory", Json::object(), Json::integer(5), STATE_PARKED);
+    std::string line2 = dispatch("step", Json::object(), Json::integer(5), STATE_PARKED);
     Json r2;
     ASSERT_TRUE(Json::parse(line2, r2));
     ASSERT_NE(r2.find("error"), nullptr);
@@ -239,6 +239,206 @@ TEST(Mcp, EveryResponseWithinCeiling)
     std::string b = dispatch("server_info", Json::object(), Json::integer(1), STATE_PARKED);
     EXPECT_LE(a.size(), MCP_MAX_PAYLOAD);
     EXPECT_LE(b.size(), MCP_MAX_PAYLOAD);
+}
+
+// -- read_memory parse + format (Slice 4) ----------------------------------
+
+TEST(Mcp, ParseMemRequestDefaults)
+{
+    // space defaults to segmented, len to MCP_READMEM_DEFAULT; addresses may be
+    // hex strings or JSON integers.
+    Json p;
+    ASSERT_TRUE(Json::parse("{\"seg\":\"0x1000\",\"off\":256}", p));
+    MemReadRequest req;
+    std::string err;
+    ASSERT_TRUE(parse_mem_request(p, req, err)) << err;
+    EXPECT_EQ(req.space, SPACE_SEGMENTED);
+    EXPECT_EQ(req.seg, 0x1000u);
+    EXPECT_EQ(req.off, 256u);
+    EXPECT_EQ(req.len, (uint32_t)MCP_READMEM_DEFAULT);
+    EXPECT_EQ(req.requested_len, (uint32_t)MCP_READMEM_DEFAULT);
+}
+
+TEST(Mcp, ParseMemRequestClampsLenToMax)
+{
+    Json p;
+    ASSERT_TRUE(Json::parse("{\"seg\":0,\"off\":0,\"len\":100000}", p));
+    MemReadRequest req;
+    std::string err;
+    ASSERT_TRUE(parse_mem_request(p, req, err)) << err;
+    EXPECT_EQ(req.len, (uint32_t)MCP_READMEM_MAX);       // capped
+    EXPECT_EQ(req.requested_len, 100000u);               // original retained
+}
+
+TEST(Mcp, ParseMemRequestSpaceVariants)
+{
+    MemReadRequest req;
+    std::string err;
+
+    Json v;
+    ASSERT_TRUE(Json::parse("{\"space\":\"virtual\",\"lin\":\"0xdead\"}", v));
+    ASSERT_TRUE(parse_mem_request(v, req, err)) << err;
+    EXPECT_EQ(req.space, SPACE_VIRTUAL);
+    EXPECT_EQ(req.off, 0xdeadu);
+
+    Json ph;
+    ASSERT_TRUE(Json::parse("{\"space\":\"physical\",\"phys\":\"0xb8000\"}", ph));
+    ASSERT_TRUE(parse_mem_request(ph, req, err)) << err;
+    EXPECT_EQ(req.space, SPACE_PHYSICAL);
+    EXPECT_EQ(req.off, 0xb8000u);
+}
+
+TEST(Mcp, ParseMemRequestRejectsBadInput)
+{
+    MemReadRequest req;
+    std::string err;
+
+    Json missing;                               // segmented needs seg + off
+    ASSERT_TRUE(Json::parse("{\"off\":0}", missing));
+    EXPECT_FALSE(parse_mem_request(missing, req, err));
+
+    Json badspace;
+    ASSERT_TRUE(Json::parse("{\"space\":\"nope\",\"seg\":0,\"off\":0}", badspace));
+    EXPECT_FALSE(parse_mem_request(badspace, req, err));
+
+    Json zerolen;
+    ASSERT_TRUE(Json::parse("{\"seg\":0,\"off\":0,\"len\":0}", zerolen));
+    EXPECT_FALSE(parse_mem_request(zerolen, req, err));
+}
+
+TEST(Mcp, FormatMemoryHexAndUnreadable)
+{
+    MemReadRequest req;
+    req.space = SPACE_SEGMENTED; req.seg = 0x1000; req.off = 0x0100;
+    req.len = 4; req.requested_len = 4;
+
+    MemReadResult out;
+    out.addr_valid = true; out.addr = 0x00010100;
+    out.bytes    = {0x90, 0xcc, 0x00, 0xff};
+    out.readable = {true, false, true, true};   // second byte page-faulted
+
+    Json r = format_memory(req, out);
+    EXPECT_EQ(r.find("space")->asString(), "segmented");
+    EXPECT_EQ(r.find("seg")->asString(), "0x1000");
+    EXPECT_EQ(r.find("off")->asString(), "0x00000100");
+    EXPECT_EQ(r.find("addr")->asString(), "0x00010100");
+    EXPECT_EQ(r.find("hex")->asString(), "90??00ff");   // unreadable -> "??"
+    EXPECT_EQ(r.find("unreadable")->asInt(), 1);
+    EXPECT_EQ(r.find("len")->asInt(), 4);
+    EXPECT_FALSE(r.find("truncated")->asBool());
+}
+
+TEST(Mcp, FormatMemoryReportsTruncationAndNext)
+{
+    MemReadRequest req;
+    req.space = SPACE_SEGMENTED; req.seg = 0; req.off = 0x1000;
+    req.len = (uint32_t)MCP_READMEM_MAX; req.requested_len = 100000;
+
+    MemReadResult out;
+    out.addr_valid = true; out.addr = 0x1000;
+    out.bytes.assign(MCP_READMEM_MAX, 0xab);
+    out.readable.assign(MCP_READMEM_MAX, true);
+
+    Json r = format_memory(req, out);
+    EXPECT_TRUE(r.find("truncated")->asBool());
+    EXPECT_EQ(r.find("next_off")->asString(),
+              "0x00002000");                            // off + MAX (0x1000+0x1000)
+    // Bounded: 4096 bytes -> 8192 hex chars, comfortably under the ceiling.
+    std::string body = make_result(Json::integer(1), r);
+    EXPECT_LE(body.size(), MCP_MAX_PAYLOAD);
+    EXPECT_EQ(enforce_max_payload(Json::integer(1), body), body);
+}
+
+TEST(Mcp, FormatMemoryUnresolvedSelector)
+{
+    MemReadRequest req;
+    req.space = SPACE_SEGMENTED; req.seg = 0x0008; req.off = 0;
+    req.len = 16; req.requested_len = 16;
+
+    MemReadResult out;
+    out.addr_valid = false;                             // GetAddress -> no address
+
+    Json r = format_memory(req, out);
+    EXPECT_FALSE(r.find("addr_valid")->asBool());
+    EXPECT_EQ(r.find("addr"), nullptr);                 // omitted when unresolved
+    EXPECT_EQ(r.find("len")->asInt(), 0);
+    EXPECT_EQ(r.find("hex")->asString(), "");
+}
+
+// -- disassemble parse + format (Slice 4) ----------------------------------
+
+TEST(Mcp, ParseDisasmRequestDefaultsAndClamp)
+{
+    Json p;
+    ASSERT_TRUE(Json::parse("{\"seg\":\"0xf000\",\"off\":\"0xfff0\"}", p));
+    DisasmRequest req;
+    std::string err;
+    ASSERT_TRUE(parse_disasm_request(p, req, err)) << err;
+    EXPECT_EQ(req.seg, 0xf000u);
+    EXPECT_EQ(req.off, 0xfff0u);
+    EXPECT_EQ(req.count, (uint32_t)MCP_DISASM_DEFAULT);
+    EXPECT_FALSE(req.have_big);
+
+    Json p2;
+    ASSERT_TRUE(Json::parse("{\"seg\":0,\"off\":0,\"count\":1000,\"big\":true}", p2));
+    ASSERT_TRUE(parse_disasm_request(p2, req, err)) << err;
+    EXPECT_EQ(req.count, (uint32_t)MCP_DISASM_MAX);      // capped
+    EXPECT_EQ(req.requested_count, 1000u);
+    EXPECT_TRUE(req.have_big);
+    EXPECT_TRUE(req.big);
+}
+
+TEST(Mcp, ParseDisasmRequestRejectsMissingAddr)
+{
+    DisasmRequest req;
+    std::string err;
+    Json p;
+    ASSERT_TRUE(Json::parse("{\"off\":0}", p));         // seg missing
+    EXPECT_FALSE(parse_disasm_request(p, req, err));
+}
+
+TEST(Mcp, FormatDisasmInstructions)
+{
+    DisasmRequest req;
+    req.seg = 0xf000; req.off = 0xfff0;
+    req.count = 16; req.requested_count = 16;
+
+    DisasmResult out;
+    out.addr_valid = true; out.big = false;
+
+    DisasmInsn a;
+    a.seg = 0xf000; a.off = 0xfff0; a.addr = 0xffff0;
+    a.bytes = {0xea, 0x5b, 0xe0}; a.readable = {true, true, true};
+    a.text = "jmp f000:e05b";
+    out.insns.push_back(a);
+
+    Json r = format_disasm(req, out);
+    EXPECT_EQ(r.find("seg")->asString(), "0xf000");
+    EXPECT_FALSE(r.find("big")->asBool());
+    EXPECT_TRUE(r.find("addr_valid")->asBool());
+    EXPECT_EQ(r.find("count")->asInt(), 1);
+    EXPECT_FALSE(r.find("truncated")->asBool());
+
+    const Json *insns = r.find("insns");
+    ASSERT_NE(insns, nullptr);
+    ASSERT_TRUE(insns->isArray());
+
+    // The Json value type exposes object lookup but not array indexing, so assert
+    // the (deterministic) serialized instruction object directly.
+    EXPECT_NE(r.serialize().find(
+        "{\"off\":\"0x0000fff0\",\"addr\":\"0x000ffff0\","
+        "\"bytes\":\"ea5be0\",\"text\":\"jmp f000:e05b\"}"), std::string::npos);
+}
+
+TEST(Mcp, FormatDisasmTruncationFlag)
+{
+    DisasmRequest req;
+    req.seg = 0; req.off = 0;
+    req.count = (uint32_t)MCP_DISASM_MAX; req.requested_count = 1000;
+    DisasmResult out;
+    out.addr_valid = true; out.big = true;
+    Json r = format_disasm(req, out);
+    EXPECT_TRUE(r.find("truncated")->asBool());
 }
 
 } // namespace

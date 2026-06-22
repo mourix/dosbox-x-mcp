@@ -8,6 +8,7 @@
 #if C_MCP
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 /* Provided by the rest of the MCP module (mcp.cpp / mcp_server.cpp). Declared
@@ -150,6 +151,38 @@ const char *cpu_mode(const RegisterSnapshot &s) {
     return s.code_big ? "pr32" : "pr16";
 }
 
+/* Lowercase two-char hex per byte; unreadable bytes render as "??" so the dump
+ * is self-describing and stays a fixed 2 chars/byte (bounded by construction). */
+std::string hex_bytes(const std::vector<uint8_t> &bytes,
+                      const std::vector<bool> &readable) {
+    std::string s;
+    s.reserve(bytes.size() * 2);
+    for (size_t i = 0; i < bytes.size(); i++) {
+        if (i < readable.size() && !readable[i]) { s += "??"; continue; }
+        char b[3];
+        std::snprintf(b, sizeof(b), "%02x", (unsigned)bytes[i]);
+        s += b;
+    }
+    return s;
+}
+
+/* Accept a JSON integer or a hex ("0x1f"/"0X1F") / decimal ("31") string. Pure;
+ * used by the param parsers so the client may pass either form. */
+bool json_to_u32(const Json *v, uint32_t &out) {
+    if (v == nullptr) return false;
+    if (v->isNumber()) { out = (uint32_t)v->asInt(); return true; }
+    if (v->isString()) {
+        const std::string &s = v->asString();
+        if (s.empty()) return false;
+        char *end = nullptr;
+        unsigned long val = std::strtoul(s.c_str(), &end, 0); /* 0 -> auto-base */
+        if (end == s.c_str() || *end != '\0') return false;
+        out = (uint32_t)val;
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 Json format_registers(const RegisterSnapshot &s) {
@@ -192,6 +225,134 @@ Json format_registers(const RegisterSnapshot &s) {
     return r;
 }
 
+// -- read_memory (Slice 4) -------------------------------------------------
+
+bool parse_mem_request(const Json &params, MemReadRequest &req, std::string &err) {
+    req.space = SPACE_SEGMENTED;
+    req.seg = 0; req.off = 0;
+
+    const Json *spc = params.find("space");
+    if (spc != nullptr) {
+        if (!spc->isString()) { err = "space must be a string"; return false; }
+        const std::string &s = spc->asString();
+        if      (s == "segmented") req.space = SPACE_SEGMENTED;
+        else if (s == "virtual")   req.space = SPACE_VIRTUAL;
+        else if (s == "physical")  req.space = SPACE_PHYSICAL;
+        else { err = "unknown space (want segmented|virtual|physical): " + s; return false; }
+    }
+
+    if (req.space == SPACE_SEGMENTED) {
+        uint32_t seg;
+        if (!json_to_u32(params.find("seg"), seg)) { err = "missing/invalid seg"; return false; }
+        req.seg = (uint16_t)seg;
+        if (!json_to_u32(params.find("off"), req.off)) { err = "missing/invalid off"; return false; }
+    } else if (req.space == SPACE_VIRTUAL) {
+        if (!json_to_u32(params.find("lin"), req.off)) { err = "missing/invalid lin"; return false; }
+    } else { /* SPACE_PHYSICAL */
+        if (!json_to_u32(params.find("phys"), req.off)) { err = "missing/invalid phys"; return false; }
+    }
+
+    uint32_t len = (uint32_t)MCP_READMEM_DEFAULT;
+    if (params.has("len") && !json_to_u32(params.find("len"), len)) {
+        err = "invalid len"; return false;
+    }
+    if (len == 0) { err = "len must be >= 1"; return false; }
+    req.requested_len = len;
+    req.len = len > (uint32_t)MCP_READMEM_MAX ? (uint32_t)MCP_READMEM_MAX : len;
+    return true;
+}
+
+Json format_memory(const MemReadRequest &req, const MemReadResult &out) {
+    Json r = Json::object();
+    const char *space = req.space == SPACE_SEGMENTED ? "segmented" :
+                        req.space == SPACE_VIRTUAL   ? "virtual" : "physical";
+    r.set("space", Json::str(space));
+    if (req.space == SPACE_SEGMENTED) {
+        r.set("seg", Json::str(hex(req.seg, 4)));
+        r.set("off", Json::str(hex(req.off, 8)));
+    } else if (req.space == SPACE_VIRTUAL) {
+        r.set("lin", Json::str(hex(req.off, 8)));
+    } else {
+        r.set("phys", Json::str(hex(req.off, 8)));
+    }
+
+    r.set("addr_valid", Json::boolean(out.addr_valid));
+    if (out.addr_valid)
+        r.set("addr", Json::str(hex((uint32_t)out.addr, 8)));
+
+    size_t unreadable = 0;
+    for (size_t i = 0; i < out.readable.size(); i++) if (!out.readable[i]) unreadable++;
+
+    r.set("len", Json::integer((long long)out.bytes.size()));
+    r.set("hex", Json::str(hex_bytes(out.bytes, out.readable)));
+    r.set("unreadable", Json::integer((long long)unreadable));
+
+    /* Pagination: if the caller asked for more than the per-call cap, report the
+     * truncation and the next offset so they can continue (Response bounds). */
+    bool truncated = req.requested_len > req.len;
+    r.set("truncated", Json::boolean(truncated));
+    if (truncated) {
+        if (req.space == SPACE_SEGMENTED)
+            r.set("next_off", Json::str(hex(req.off + req.len, 8)));
+        else if (req.space == SPACE_VIRTUAL)
+            r.set("next_lin", Json::str(hex(req.off + req.len, 8)));
+        else
+            r.set("next_phys", Json::str(hex(req.off + req.len, 8)));
+    }
+    return r;
+}
+
+// -- disassemble (Slice 4) -------------------------------------------------
+
+bool parse_disasm_request(const Json &params, DisasmRequest &req, std::string &err) {
+    uint32_t seg;
+    if (!json_to_u32(params.find("seg"), seg)) { err = "missing/invalid seg"; return false; }
+    req.seg = (uint16_t)seg;
+    if (!json_to_u32(params.find("off"), req.off)) { err = "missing/invalid off"; return false; }
+
+    uint32_t count = (uint32_t)MCP_DISASM_DEFAULT;
+    if (params.has("count") && !json_to_u32(params.find("count"), count)) {
+        err = "invalid count"; return false;
+    }
+    if (count == 0) { err = "count must be >= 1"; return false; }
+    req.requested_count = count;
+    req.count = count > (uint32_t)MCP_DISASM_MAX ? (uint32_t)MCP_DISASM_MAX : count;
+
+    req.have_big = false;
+    req.big = false;
+    const Json *big = params.find("big");
+    if (big != nullptr) {
+        if (!big->isBool()) { err = "big must be a boolean"; return false; }
+        req.have_big = true;
+        req.big = big->asBool();
+    }
+    return true;
+}
+
+Json format_disasm(const DisasmRequest &req, const DisasmResult &out) {
+    Json r = Json::object();
+    r.set("seg", Json::str(hex(req.seg, 4)));
+    r.set("big", Json::boolean(out.big));
+    r.set("addr_valid", Json::boolean(out.addr_valid));
+
+    Json arr = Json::array();
+    for (size_t i = 0; i < out.insns.size(); i++) {
+        const DisasmInsn &ins = out.insns[i];
+        Json o = Json::object();
+        o.set("off",  Json::str(hex(ins.off, 8)));
+        o.set("addr", Json::str(hex((uint32_t)ins.addr, 8)));
+        o.set("bytes", Json::str(hex_bytes(ins.bytes, ins.readable)));
+        o.set("text", Json::str(ins.text));
+        arr.push(o);
+    }
+    r.set("count", Json::integer((long long)out.insns.size()));
+    r.set("insns", arr);
+
+    bool truncated = req.requested_count > req.count;
+    r.set("truncated", Json::boolean(truncated));
+    return r;
+}
+
 std::string dispatch(const std::string &method, const Json &params,
                      const Json &id, ExecState state) {
     (void)params;
@@ -211,6 +372,24 @@ std::string dispatch(const std::string &method, const Json &params,
         RegisterSnapshot snap;
         snapshot_registers(snap);
         return enforce_max_payload(id, make_result(id, format_registers(snap)));
+    }
+    if (method == "read_memory") {
+        MemReadRequest req;
+        std::string perr;
+        if (!parse_mem_request(params, req, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        MemReadResult out;
+        read_memory(req, out);
+        return enforce_max_payload(id, make_result(id, format_memory(req, out)));
+    }
+    if (method == "disassemble") {
+        DisasmRequest req;
+        std::string perr;
+        if (!parse_disasm_request(params, req, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        DisasmResult out;
+        disassemble(req, out);
+        return enforce_max_payload(id, make_result(id, format_disasm(req, out)));
     }
 
     /* Known method whose handler arrives in a later slice. */

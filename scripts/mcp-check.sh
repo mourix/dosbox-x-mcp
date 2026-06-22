@@ -95,6 +95,9 @@ python3 scripts/mcp_slice2_ping.py || fail "integration test #2 (JSON-RPC round 
 log "running integration test #3: read_registers at a stop (Slice 3)"
 python3 scripts/mcp_slice3_registers.py || fail "integration test #3 (read_registers) failed"
 
+log "running integration test #4: read_memory + disassemble (Slice 4)"
+python3 scripts/mcp_slice4_memory.py || fail "integration test #4 (read_memory/disassemble) failed"
+
 # 4. Isolation proof: the core must still build with the flag OFF.
 if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
     build

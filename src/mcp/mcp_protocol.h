@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "mcp_json.h"
 
@@ -95,6 +96,96 @@ void snapshot_registers(RegisterSnapshot &snap);
 /* Pure: format a snapshot as compact, bounded JSON-RPC result. Deterministic key
  * order so unit-test assertions are exact. */
 Json format_registers(const RegisterSnapshot &snap);
+
+/* ---- read_memory / disassemble (Slice 4) --------------------------------
+ *
+ * Same reader/formatter split as Slice 3: the param *parsing* and result
+ * *formatting* are pure (here / mcp_protocol.cpp, unit-testable with no boot),
+ * while the byte/instruction *reading* touches emulator memory and lives in the
+ * bridge mcp_memory.cpp. The three address spaces mirror the debugger's data
+ * views (DBGBlock::DATV_SEGMENTED/VIRTUAL/PHYSICAL, debug.cpp:1020).
+ */
+
+enum AddrSpace { SPACE_SEGMENTED, SPACE_VIRTUAL, SPACE_PHYSICAL };
+
+/* A parsed, already-bounds-clamped read_memory request. For SPACE_SEGMENTED the
+ * address is seg:off; for SPACE_VIRTUAL `off` is a linear address; for
+ * SPACE_PHYSICAL `off` is a physical address (seg unused). `len` is clamped to
+ * [1, MCP_READMEM_MAX]; `requested_len` keeps the pre-clamp value so the
+ * formatter can report truncation + the next offset for pagination. */
+struct MemReadRequest {
+    AddrSpace space;
+    uint16_t  seg;
+    uint32_t  off;
+    uint32_t  len;
+    uint32_t  requested_len;
+};
+
+/* Filled by the bridge. `bytes`/`readable` each have exactly req.len entries;
+ * an unreadable (page-faulting / unmapped) byte has readable[i]==false and is
+ * rendered "??". `addr_valid` is false only when a SPACE_SEGMENTED selector does
+ * not resolve (GetAddress -> no address); then bytes/readable are empty. */
+struct MemReadResult {
+    bool                 addr_valid;
+    uint64_t             addr;   /* resolved linear (seg/virt) or physical addr */
+    std::vector<uint8_t> bytes;
+    std::vector<bool>    readable;
+};
+
+/* Pure: parse params into req (defaults: space=segmented, len=MCP_READMEM_DEFAULT).
+ * Accepts address fields as JSON integers or hex/decimal strings ("0x1000").
+ * Returns false and sets err on a missing/invalid field or unknown space. */
+bool parse_mem_request(const Json &params, MemReadRequest &req, std::string &err);
+
+/* Pure: format a read result as compact, bounded JSON. */
+Json format_memory(const MemReadRequest &req, const MemReadResult &out);
+
+/* Bridge (mcp_memory.cpp): read req.len bytes from the requested space into out.
+ * Touches emulator memory, so it must run on the emulator thread while parked. */
+void read_memory(const MemReadRequest &req, MemReadResult &out);
+
+/* A parsed, already-bounds-clamped disassemble request. Disassembly is always
+ * segmented (seg:off, off = starting EIP). `count` is clamped to
+ * [1, MCP_DISASM_MAX]. `big` selects 16/32-bit decoding; when `have_big` is
+ * false the bridge defaults it from cpu.code.big. */
+struct DisasmRequest {
+    uint16_t seg;
+    uint32_t off;
+    uint32_t count;
+    uint32_t requested_count;
+    bool     have_big;
+    bool     big;
+};
+
+/* One decoded instruction. `bytes`/`readable` are the raw instruction bytes;
+ * `text` is the disassembly. */
+struct DisasmInsn {
+    uint16_t             seg;
+    uint32_t             off;
+    uint64_t             addr;   /* resolved linear/physical address */
+    std::vector<uint8_t> bytes;
+    std::vector<bool>    readable;
+    std::string          text;
+};
+
+/* Filled by the bridge. `addr_valid` false only when the starting selector does
+ * not resolve. `big` is the code size actually used. */
+struct DisasmResult {
+    bool                    addr_valid;
+    bool                    big;
+    std::vector<DisasmInsn> insns;
+};
+
+/* Pure: parse params into req (defaults: count=MCP_DISASM_DEFAULT). seg + off are
+ * required. Returns false and sets err on a missing/invalid field. */
+bool parse_disasm_request(const Json &params, DisasmRequest &req, std::string &err);
+
+/* Pure: format a disassembly result as compact, bounded JSON. */
+Json format_disasm(const DisasmRequest &req, const DisasmResult &out);
+
+/* Bridge (mcp_memory.cpp): decode req.count instructions starting at seg:off.
+ * Touches emulator memory, so it must run on the emulator thread while parked. */
+void disassemble(const DisasmRequest &req, DisasmResult &out);
 
 /* Pure dispatch: given a parsed request and the current execution state, return
  * the full response line. Handles unknown methods, mode-mismatch fast-reject,

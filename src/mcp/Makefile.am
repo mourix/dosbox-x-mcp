@@ -5,4 +5,5 @@ libmcp_a_SOURCES = \
 	mcp.cpp mcp.h \
 	mcp_json.cpp mcp_json.h \
 	mcp_protocol.cpp mcp_protocol.h \
+	mcp_registers.cpp \
 	mcp_server.cpp mcp_server.h

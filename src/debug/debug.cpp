@@ -5012,10 +5012,13 @@ void DEBUG_Enable_Handler(bool pressed) {
 
 	static bool showhelp=false;
 
-#if defined(MACOSX) || defined(LINUX)
+#if (defined(MACOSX) || defined(LINUX)) && !C_MCP
 	/* Mac OS X does not have a console for us to just allocate on a whim like Windows does.
 	   So the debugger interface is useless UNLESS the user has started us from a terminal
-	   (whether over SSH or from the Terminal app). */
+	   (whether over SSH or from the Terminal app).
+	   In an MCP build this no-tty guard is skipped: the debugger has no ncurses TUI and its
+	   input source is the MCP request queue, not a terminal, so it must engage headless
+	   (e.g. under -break-start). See docs/MCP_BUILD_PLAN.md ("No ncurses TUI in MCP mode"). */
     bool allow = true;
 
     if (!isatty(0) || !isatty(1) || !isatty(2))

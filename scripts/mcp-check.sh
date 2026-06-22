@@ -92,6 +92,9 @@ python3 scripts/mcp_slice1_screenshot.py || fail "integration test #1 (headless 
 log "running integration test #2: TCP JSON-RPC round trip (Slice 2)"
 python3 scripts/mcp_slice2_ping.py || fail "integration test #2 (JSON-RPC round trip) failed"
 
+log "running integration test #3: read_registers at a stop (Slice 3)"
+python3 scripts/mcp_slice3_registers.py || fail "integration test #3 (read_registers) failed"
+
 # 4. Isolation proof: the core must still build with the flag OFF.
 if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
     build

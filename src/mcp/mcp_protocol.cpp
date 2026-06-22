@@ -7,6 +7,7 @@
 
 #if C_MCP
 
+#include <cstdio>
 #include <cstring>
 
 /* Provided by the rest of the MCP module (mcp.cpp / mcp_server.cpp). Declared
@@ -135,7 +136,61 @@ Json handle_server_info(ExecState state) {
     return r;
 }
 
+/* Fixed-width lowercase hex with 0x prefix, so register values are unambiguous
+ * and the formatted output has a stable size. */
+std::string hex(uint32_t v, int digits) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "0x%0*x", digits, (unsigned)v);
+    return buf;
+}
+
+const char *cpu_mode(const RegisterSnapshot &s) {
+    if (!s.pmode)  return "real";
+    if (s.vm86)    return "vm86";
+    return s.code_big ? "pr32" : "pr16";
+}
+
 } // namespace
+
+Json format_registers(const RegisterSnapshot &s) {
+    Json r = Json::object();
+    r.set("eax", Json::str(hex(s.eax, 8)));
+    r.set("ebx", Json::str(hex(s.ebx, 8)));
+    r.set("ecx", Json::str(hex(s.ecx, 8)));
+    r.set("edx", Json::str(hex(s.edx, 8)));
+    r.set("esi", Json::str(hex(s.esi, 8)));
+    r.set("edi", Json::str(hex(s.edi, 8)));
+    r.set("ebp", Json::str(hex(s.ebp, 8)));
+    r.set("esp", Json::str(hex(s.esp, 8)));
+    r.set("eip", Json::str(hex(s.eip, 8)));
+
+    r.set("cs", Json::str(hex(s.cs, 4)));
+    r.set("ds", Json::str(hex(s.ds, 4)));
+    r.set("es", Json::str(hex(s.es, 4)));
+    r.set("fs", Json::str(hex(s.fs, 4)));
+    r.set("gs", Json::str(hex(s.gs, 4)));
+    r.set("ss", Json::str(hex(s.ss, 4)));
+
+    r.set("eflags", Json::str(hex(s.eflags, 8)));
+
+    /* Individual flag bits, mirroring the debugger's register view (debug.cpp:1182). */
+    Json f = Json::object();
+    f.set("CF",   Json::integer((s.eflags & 0x0001) ? 1 : 0));
+    f.set("PF",   Json::integer((s.eflags & 0x0004) ? 1 : 0));
+    f.set("AF",   Json::integer((s.eflags & 0x0010) ? 1 : 0));
+    f.set("ZF",   Json::integer((s.eflags & 0x0040) ? 1 : 0));
+    f.set("SF",   Json::integer((s.eflags & 0x0080) ? 1 : 0));
+    f.set("TF",   Json::integer((s.eflags & 0x0100) ? 1 : 0));
+    f.set("IF",   Json::integer((s.eflags & 0x0200) ? 1 : 0));
+    f.set("DF",   Json::integer((s.eflags & 0x0400) ? 1 : 0));
+    f.set("OF",   Json::integer((s.eflags & 0x0800) ? 1 : 0));
+    f.set("IOPL", Json::integer((s.eflags & 0x3000) >> 12));
+    r.set("flags", f);
+
+    r.set("mode", Json::str(cpu_mode(s)));
+    r.set("cpl", Json::integer((long long)s.cpl));
+    return r;
+}
 
 std::string dispatch(const std::string &method, const Json &params,
                      const Json &id, ExecState state) {
@@ -150,6 +205,13 @@ std::string dispatch(const std::string &method, const Json &params,
         return enforce_max_payload(id, make_result(id, handle_ping(state)));
     if (method == "server_info")
         return enforce_max_payload(id, make_result(id, handle_server_info(state)));
+    if (method == "read_registers") {
+        /* Parked-class: mode_matches already guaranteed STATE_PARKED above, so
+         * the CPU is stopped and the snapshot is coherent. */
+        RegisterSnapshot snap;
+        snapshot_registers(snap);
+        return enforce_max_payload(id, make_result(id, format_registers(snap)));
+    }
 
     /* Known method whose handler arrives in a later slice. */
     return make_error(id, MCP_ERR_NOT_IMPLEMENTED, "method not implemented yet: " + method);

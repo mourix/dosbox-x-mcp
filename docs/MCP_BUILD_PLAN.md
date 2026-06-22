@@ -94,6 +94,7 @@ glance. Adding a core edit means adding a line here with its justification.
 | Per-frame service call `MCP_GFXFrameService()` | `GFX_Events()`, `sdlmain.cpp:5895` | the **single** core call site for the dispatcher. Introduced in Slice 1 (env-gated screenshot self-test), extended in Slice 2 to start the TCP server and drain the request queue against the current execution state. `GFX_Events()` runs in **both** the normal loop and `DEBUG_Loop` (`debug.cpp:4884`), so this one drain services **both** `run`-class (running) and `parked`-class (parked) requests — no separate `DEBUG_Loop` edit is needed (it was planned but proved redundant, keeping the blast radius smaller). The current state, not the call site, decides mode-mismatch fast-reject. |
 | Skip ncurses init in MCP builds | `DEBUG_SetupConsole`, `debug.cpp:5790` | early `return` under `#if C_MCP` leaves `dbg.win_main==NULL`, so the TUI is a no-op (every draw routine null-guards) and `initscr` can't fail under no-tty CI (Slice 2). Keyed on `--enable-mcp`, not launch mode. |
 | Guard the parked `getch()` | `DEBUG_CheckKeys`, `debug.cpp:4430` | `if (dbg.win_main==NULL) return 0;` under `#if C_MCP` — the one curses call not already null-guarded; the MCP queue is the input source instead (Slice 2). |
+| Skip the no-tty guard in `DEBUG_Enable_Handler` | `debug.cpp:5015` | The Linux/macOS branch returns early (debugger "not available") when stdin/stdout/stderr aren't a terminal, so `-break-start` would never park under the headless harness (pipes, no tty). Compiled out under `#if ... && !C_MCP`: the MCP build has no ncurses TUI and its input source is the request queue, so the debugger must engage headless (Slice 3). |
 
 ## Test strategy (two layers)
 
@@ -174,6 +175,19 @@ queue timeout is the `kRequestTimeout` (5 s) path in `submit_and_wait`.
 **Tests:** unit — known snapshot → exact JSON + size bound. Integration — boot with `-break-start`
 (`sdlmain.cpp:10148`), read registers, assert known reset/entry values.
 **DoD:** `mcp-check.sh` green.
+
+**Outcome (resolved):** ✅ Shipped. The reader/formatter split keeps the protocol layer pure:
+`mcp::snapshot_registers` (new `src/mcp/mcp_registers.cpp`, the emulator-state bridge) only *reads*
+`cpu_regs`/`Segs`/`cpu` via `include/regs.h`+`include/cpu.h` — the same globals/macros the debugger's
+`DrawRegisters` uses (`debug.cpp:1146`) — into a plain `RegisterSnapshot`; `mcp::format_registers`
+(pure, in `mcp_protocol.cpp`) encodes it as compact bounded JSON (fixed-width lowercase hex, individual
+flag bits, `mode`∈{real,pr16,pr32,vm86}, `cpl`). The `read_registers` handler in `dispatch` is reached
+only when `STATE_PARKED` (parked-class mode check), so the snapshot is coherent. **No core edits** — the
+bridge reuses existing headers/globals, so the core-edit manifest is unchanged. Unit tests: exact known-
+snapshot JSON + mode/IOPL derivation + payload bound (`tests/mcp_protocol_tests.cpp`, `Mcp.FormatRegisters*`).
+Integration: `scripts/mcp_slice3_registers.py` boots headless with `-break-start`, polls `ping` until
+`state=parked`, then asserts `read_registers` shape (hex widths, full flag set, real mode + cpl 0 at reset)
+and the payload bound; wired into `scripts/mcp-check.sh` (integration test #3).
 
 ## Slice 4 — `read_memory` (paginated) + `disassemble` (bounded)
 **Goal:** inspect memory and code.

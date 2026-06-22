@@ -142,13 +142,76 @@ TEST(Mcp, DispatchModeMismatchCarriesCurrentState)
     EXPECT_EQ(err->find("code")->asInt(), MCP_ERR_MODE_MISMATCH);
     EXPECT_EQ(err->find("data")->find("state")->asString(), "running");
 
-    // Same request while parked succeeds the mode check (handler not yet
-    // implemented in this slice, so it reports not-implemented, not mismatch).
-    std::string line2 = dispatch("read_registers", Json::object(), Json::integer(5), STATE_PARKED);
+    // A parked-class request whose handler is not yet implemented (read_memory
+    // arrives in Slice 4) succeeds the mode check while parked, so it reports
+    // not-implemented rather than a mismatch.
+    std::string line2 = dispatch("read_memory", Json::object(), Json::integer(5), STATE_PARKED);
     Json r2;
     ASSERT_TRUE(Json::parse(line2, r2));
     ASSERT_NE(r2.find("error"), nullptr);
     EXPECT_EQ(r2.find("error")->find("code")->asInt(), MCP_ERR_NOT_IMPLEMENTED);
+}
+
+// -- read_registers formatting (Slice 3) -----------------------------------
+
+namespace {
+RegisterSnapshot sample_snapshot()
+{
+    RegisterSnapshot s;
+    s.eax = 0x11223344; s.ebx = 0x55667788;
+    s.ecx = 0x99aabbcc; s.edx = 0xddeeff00;
+    s.esi = 0x0a0b0c0d; s.edi = 0x10203040;
+    s.ebp = 0xcafebabe; s.esp = 0x0000fffe;
+    s.eip = 0x0000fff0;
+    s.cs = 0xf000; s.ds = 0x0040; s.es = 0x0000;
+    s.fs = 0x0000; s.gs = 0x0000; s.ss = 0x0000;
+    s.eflags = 0x00000246;  // ZF, PF, IF set (reset-ish flags word)
+    s.pmode = false; s.code_big = false; s.vm86 = false; s.cpl = 0;
+    return s;
+}
+} // namespace
+
+TEST(Mcp, FormatRegistersKnownSnapshotIsExact)
+{
+    Json r = format_registers(sample_snapshot());
+    // Exact, deterministic encoding (key order + lowercase fixed-width hex).
+    EXPECT_EQ(r.serialize(),
+        "{\"eax\":\"0x11223344\",\"ebx\":\"0x55667788\","
+        "\"ecx\":\"0x99aabbcc\",\"edx\":\"0xddeeff00\","
+        "\"esi\":\"0x0a0b0c0d\",\"edi\":\"0x10203040\","
+        "\"ebp\":\"0xcafebabe\",\"esp\":\"0x0000fffe\","
+        "\"eip\":\"0x0000fff0\","
+        "\"cs\":\"0xf000\",\"ds\":\"0x0040\",\"es\":\"0x0000\","
+        "\"fs\":\"0x0000\",\"gs\":\"0x0000\",\"ss\":\"0x0000\","
+        "\"eflags\":\"0x00000246\","
+        "\"flags\":{\"CF\":0,\"PF\":1,\"AF\":0,\"ZF\":1,\"SF\":0,"
+        "\"TF\":0,\"IF\":1,\"DF\":0,\"OF\":0,\"IOPL\":0},"
+        "\"mode\":\"real\",\"cpl\":0}");
+}
+
+TEST(Mcp, FormatRegistersModeAndIoplDerivation)
+{
+    RegisterSnapshot s = sample_snapshot();
+    s.pmode = true; s.code_big = true; s.vm86 = false;
+    s.eflags = 0x00003000;  // IOPL = 3, no other flags
+    s.cpl = 3;
+    Json r = format_registers(s);
+    EXPECT_EQ(r.find("mode")->asString(), "pr32");
+    EXPECT_EQ(r.find("flags")->find("IOPL")->asInt(), 3);
+    EXPECT_EQ(r.find("cpl")->asInt(), 3);
+
+    s.code_big = false;            // 16-bit protected mode
+    EXPECT_EQ(format_registers(s).find("mode")->asString(), "pr16");
+
+    s.vm86 = true;                 // VM86 wins over code size
+    EXPECT_EQ(format_registers(s).find("mode")->asString(), "vm86");
+}
+
+TEST(Mcp, FormatRegistersWithinCeiling)
+{
+    std::string body = make_result(Json::integer(1), format_registers(sample_snapshot()));
+    EXPECT_LE(body.size(), MCP_MAX_PAYLOAD);
+    EXPECT_EQ(enforce_max_payload(Json::integer(1), body), body);
 }
 
 // -- response bounding -----------------------------------------------------

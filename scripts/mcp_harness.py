@@ -101,14 +101,29 @@ class DosboxHarness:
         self.proc = None
 
     def output(self):
-        """Drain whatever the process has emitted so far (best effort)."""
+        """Drain whatever the process has emitted so far (best effort).
+
+        Non-blocking: a plain ``read()`` would block until the child closes its
+        stdout (i.e. exits), so calling this on a failure path while the process
+        is still alive used to hang. We flip the pipe to non-blocking and read
+        what is buffered right now.
+        """
         if self.proc is None or self.proc.stdout is None:
             return ""
         try:
-            data = self.proc.stdout.read()
+            os.set_blocking(self.proc.stdout.fileno(), False)
+            chunks = []
+            while True:
+                try:
+                    data = self.proc.stdout.read()
+                except (BlockingIOError, Exception):
+                    break
+                if not data:
+                    break
+                chunks.append(data)
+            return b"".join(chunks).decode("utf-8", "replace")
         except Exception:
             return ""
-        return data.decode("utf-8", "replace") if data else ""
 
     # -- context manager ---------------------------------------------------
     def __enter__(self):

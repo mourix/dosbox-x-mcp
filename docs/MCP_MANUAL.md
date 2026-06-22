@@ -6,8 +6,9 @@ authoritative reference for tool names and parameters is the MCP tool definition
 themselves (the single source of truth) — this manual does not duplicate schemas.
 
 > Status: **early.** The transport is live (Slice 2): a TCP JSON-RPC server with
-> `ping` / `server_info`. State-touching tools land in later slices. Keep workflows here
-> in sync with the implemented tools; update on every feature.
+> `ping` / `server_info`. The first state-touching tool, `read_registers`, landed in
+> Slice 3. Remaining tools land in later slices. Keep workflows here in sync with the
+> implemented tools; update on every feature.
 
 ## Build flag
 
@@ -68,8 +69,9 @@ The emulator is either **running** (CPU free-running; the game executes) or **pa
 
 If you send a parked-class tool while running (or vice-versa) you get the `-32001`
 mismatch error telling you the current state; switch with `break` / `continue` first.
-(Only the `any`-class tools — `ping`, `server_info` — exist as of Slice 2; the rest land
-in later slices but are already classified so mismatches are reported correctly.)
+(Implemented so far: the `any`-class `ping` / `server_info`, and the parked-class
+`read_registers`. The remaining tools are already classified so mismatches are reported
+correctly, but their handlers land in later slices.)
 
 ## Mental model
 
@@ -82,7 +84,14 @@ in later slices but are already classified so mismatches are reported correctly.
 ## Core workflows (to be filled in as tools are added)
 
 ### Attach / inspect state
-_TODO: how to connect, confirm the emulator is running, read CPU + segment registers._
+Connect over TCP (the `MCP_PORT` the launcher set), then `ping` to confirm liveness and
+learn the current state. To inspect CPU state you must be **parked**: launch with
+`-break-start` (parks at machine reset) or `break` into a running guest, then call
+`read_registers`. It returns the general-purpose registers (`eax`…`eip`) and segment
+registers (`cs`…`ss`) as fixed-width hex, the full `eflags` word plus a decoded `flags`
+object (`CF`,`PF`,`AF`,`ZF`,`SF`,`TF`,`IF`,`DF`,`OF`,`IOPL`), the CPU `mode`
+(`real`/`pr16`/`pr32`/`vm86`) and `cpl`. Calling it while the guest is free-running
+returns the `-32001` mismatch error — `break` first.
 
 ### Read memory / disassemble
 _TODO: read a memory window (seg:off or linear/physical), disassemble at an address,

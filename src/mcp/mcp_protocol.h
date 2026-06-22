@@ -15,6 +15,7 @@
 #if C_MCP
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "mcp_json.h"
@@ -70,6 +71,30 @@ std::string make_busy_error();
  * is returned unchanged; otherwise an MCP_ERR_TOO_LARGE error (which always
  * fits) is returned instead. Pure — the runtime side of guardrail #3. */
 std::string enforce_max_payload(const Json &id, const std::string &body);
+
+/* A plain-data snapshot of the guest CPU at a stop (Slice 3, read_registers).
+ * Decoupling the *reading* of emulator globals (MCP_SnapshotRegisters, defined in
+ * the emulator-state bridge mcp_registers.cpp) from the *formatting* (format_registers,
+ * pure) keeps this layer unit-testable against a known snapshot without an emulator
+ * boot. Mirrors the fields the debugger's DrawRegisters shows (debug.cpp:1146). */
+struct RegisterSnapshot {
+    uint32_t eax, ebx, ecx, edx, esi, edi, ebp, esp, eip;
+    uint16_t cs, ds, es, fs, gs, ss;
+    uint32_t eflags;          /* full FLAGS/EFLAGS word */
+    bool     pmode;           /* protected mode enabled */
+    bool     code_big;        /* current code segment is 32-bit */
+    bool     vm86;            /* virtual-8086 mode (FLAG_VM) */
+    unsigned cpl;             /* current privilege level 0..3 */
+};
+
+/* Reads the live guest CPU state into snap. Touches emulator globals
+ * (cpu_regs/Segs/cpu), so it must run on the emulator thread while parked;
+ * defined in mcp_registers.cpp. Declared here so the dispatcher can call it. */
+void snapshot_registers(RegisterSnapshot &snap);
+
+/* Pure: format a snapshot as compact, bounded JSON-RPC result. Deterministic key
+ * order so unit-test assertions are exact. */
+Json format_registers(const RegisterSnapshot &snap);
 
 /* Pure dispatch: given a parsed request and the current execution state, return
  * the full response line. Handles unknown methods, mode-mismatch fast-reject,

@@ -14,7 +14,7 @@
 #if C_MCP
 
 /* Compile-time version of the MCP module. Bumped as slices land. */
-#define MCP_VERSION "0.3.0-slice3"
+#define MCP_VERSION "0.5.0-slice5"
 
 /* Returns the MCP module version string (see MCP_VERSION). */
 const char *MCP_Version(void);

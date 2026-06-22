@@ -7,4 +7,5 @@ libmcp_a_SOURCES = \
 	mcp_protocol.cpp mcp_protocol.h \
 	mcp_registers.cpp \
 	mcp_memory.cpp \
+	mcp_execution.cpp \
 	mcp_server.cpp mcp_server.h

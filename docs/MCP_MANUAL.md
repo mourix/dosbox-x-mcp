@@ -7,8 +7,9 @@ themselves (the single source of truth) — this manual does not duplicate schem
 
 > Status: **early.** The transport is live (Slice 2): a TCP JSON-RPC server with
 > `ping` / `server_info`. State-touching tools landed so far: `read_registers` (Slice 3),
-> `read_memory` + `disassemble` (Slice 4). Remaining tools land in later slices. Keep
-> workflows here in sync with the implemented tools; update on every feature.
+> `read_memory` + `disassemble` (Slice 4), and execution control `step` / `step_over` /
+> `continue` / `break` (Slice 5). Remaining tools land in later slices. Keep workflows here
+> in sync with the implemented tools; update on every feature.
 
 ## Build flag
 
@@ -69,9 +70,10 @@ The emulator is either **running** (CPU free-running; the game executes) or **pa
 
 If you send a parked-class tool while running (or vice-versa) you get the `-32001`
 mismatch error telling you the current state; switch with `break` / `continue` first.
-(Implemented so far: the `any`-class `ping` / `server_info`, and the parked-class
-`read_registers`, `read_memory`, `disassemble`. The remaining tools are already classified
-so mismatches are reported correctly, but their handlers land in later slices.)
+(Implemented so far: the `any`-class `ping` / `server_info`; the parked-class
+`read_registers`, `read_memory`, `disassemble`, `step`, `step_over`, `continue`; and the
+run-class `break`. The remaining tools are already classified so mismatches are reported
+correctly, but their handlers land in later slices.)
 
 ## Mental model
 
@@ -117,9 +119,31 @@ space you mean:
 Pagination convention: ask for a window, then continue from the returned `next_*` (memory)
 or the last instruction's offset (disasm) rather than requesting a huge range at once.
 
-### Breakpoints and stepping
-_TODO: set/clear breakpoints, run-to-breakpoint, single-step, step-over, read state at
-the stop._
+### Stepping and run/break control
+Four execution-control tools move the guest between the two states. `step` / `step_over` /
+`continue` are **parked**-class (you must already be parked); `break` is **run**-class
+(it stops a free-running guest). Each returns a compact stop report: `op`, the resulting
+`state`, a `resumed` flag, the DEBUG_Run status `ran`, and the live `cs`/`eip`.
+
+- **`step`** — trace into one instruction. Stays parked (`resumed: false`); the returned
+  `cs`:`eip` are the **new** stop, so you can step-and-inspect in a tight loop. To advance
+  N instructions, call it N times.
+- **`step_over`** — like `step`, but if the current instruction is a `call`/`int`/`loop`/
+  `rep` it sets a temporary breakpoint after it and lets the guest run until it returns.
+  In that case the reply comes back `resumed: true` / `state: running`; **poll `ping`
+  until it reports `parked`** again, then inspect. For a non-call instruction it behaves
+  exactly like `step` (parked, not resumed).
+- **`continue`** — release the guest to free-run until the next stop (a breakpoint, or a
+  `break`). Returns `resumed: true` / `state: running`; the reported `cs`:`eip` are the
+  point it was released from, **not** the eventual stop. Poll `ping` until `parked`, then
+  `read_registers` to see where it stopped.
+- **`break`** — stop a free-running guest and re-enter the debugger. Poll `ping` until
+  `parked` before issuing parked-class tools.
+
+Mode matters: `step`/`step_over`/`continue` while running, or `break` while parked, return
+the `-32001` mismatch error (with `data.state`) instead of blocking — check `ping` / the
+last stop report for the current state and switch first. The general loop is **break (or
+`-break-start`) → inspect → step/step_over → inspect → continue → poll until parked**.
 
 ### Typical reverse-engineering loop
 _TODO: load target → break at entry → step → inspect → map behavior → record findings._

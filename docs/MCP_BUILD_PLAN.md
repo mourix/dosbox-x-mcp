@@ -95,6 +95,7 @@ glance. Adding a core edit means adding a line here with its justification.
 | Skip ncurses init in MCP builds | `DEBUG_SetupConsole`, `debug.cpp:5790` | early `return` under `#if C_MCP` leaves `dbg.win_main==NULL`, so the TUI is a no-op (every draw routine null-guards) and `initscr` can't fail under no-tty CI (Slice 2). Keyed on `--enable-mcp`, not launch mode. |
 | Guard the parked `getch()` | `DEBUG_CheckKeys`, `debug.cpp:4430` | `if (dbg.win_main==NULL) return 0;` under `#if C_MCP` — the one curses call not already null-guarded; the MCP queue is the input source instead (Slice 2). |
 | Skip the no-tty guard in `DEBUG_Enable_Handler` | `debug.cpp:5015` | The Linux/macOS branch returns early (debugger "not available") when stdin/stdout/stderr aren't a terminal, so `-break-start` would never park under the headless harness (pipes, no tty). Compiled out under `#if ... && !C_MCP`: the MCP build has no ncurses TUI and its input source is the request queue, so the debugger must engage headless (Slice 3). |
+| Execution-control entry point `MCP_DebugExec()` | `debug.cpp` (after `DEBUG_Run`) | one `#if C_MCP` function the MCP module calls to drive step/step_over/continue/break (Slice 5). It must live in `debug.cpp` because it manipulates debugger statics that are not exported — `debugging`, `exitLoop`, `mustCompleteInstruction`, and the static `StepOver()` — and it reuses the exact primitives the F11/F10/F5 key handlers and `-break-start` use (`DEBUG_Run`, `DEBUG_EnableDebugger`). Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
 
 ## Test strategy (two layers)
 
@@ -227,6 +228,28 @@ next breakpoint re-enters `DEBUG_Loop`; report the stop (seg:off). `break` is a 
 at `GFX_Events` (sets `debugging=true`, swaps in `DEBUG_Loop`).
 **Tests:** integration — step N, assert EIP advances; continue to a planted breakpoint, assert stop addr.
 **DoD:** `mcp-check.sh` green.
+
+**Outcome (resolved):** ✅ Shipped. The reader/formatter split is preserved with one wrinkle:
+because execution control *mutates* debugger state, the side-effecting primitive lives in
+**`debug.cpp` as `MCP_DebugExec`** (the single Slice 5 core edit, in the manifest) — it must,
+since it touches statics that are not exported (`debugging`, `exitLoop`, `mustCompleteInstruction`,
+the static `StepOver`) and reuses the exact F11/F10/F5/-break-start primitives. The thin bridge
+`src/mcp/mcp_execution.cpp` marshals the `ExecOp` into that call and reads back CS:EIP + state;
+`mcp::format_exec` (pure, `mcp_protocol.cpp`) renders the compact stop report
+(`op`/`state`/`resumed`/`ran`/`cs`/`eip`). `step` traces one instruction and stays parked
+(`resumed:false`, CS:EIP = new stop); `step_over` steps over a call/int/loop/rep (else a plain
+step); `continue` releases the guest to free-run (`debugging=false`+`DEBUG_Run(1,false)`, with the
+`inhibit_int_breakpoint` guard and the `DEBUG_NullCPUCore` exit-status check mirrored from F5);
+`break` is run-class and engages the debugger via `DEBUG_EnableDebugger` (same path as
+`-break-start`). Resumed ops report `state:running`; the client polls `ping` until parked. The
+`step`/`step_over`/`continue` handlers are reached only when `STATE_PARKED`, `break` only when
+`STATE_RUNNING` (classify table from Slice 2). Unit tests: `tests/mcp_protocol_tests.cpp`
+(`Mcp.FormatExec*`, `Mcp.ExecControlClassification`). Integration: `scripts/mcp_slice5_exec.py`
+boots headless with `-break-start`, single-steps (asserts CS:EIP advances + stays parked +
+agrees with `read_registers`), step-overs back to parked, `continue`s to running, `break`s back
+to parked (asserts CS:EIP advanced, proving the guest executed), and asserts both mode-mismatch
+fast-rejects (step-while-running, break-while-parked); wired into `scripts/mcp-check.sh`
+(integration test #5).
 
 ## Slice 6 — Breakpoints: `list` / `add` / `delete`
 **Goal:** breakpoint management (exec + interrupt + memory-watch).

@@ -142,10 +142,12 @@ TEST(Mcp, DispatchModeMismatchCarriesCurrentState)
     EXPECT_EQ(err->find("code")->asInt(), MCP_ERR_MODE_MISMATCH);
     EXPECT_EQ(err->find("data")->find("state")->asString(), "running");
 
-    // A parked-class request whose handler is not yet implemented (step arrives
-    // in Slice 5) succeeds the mode check while parked, so it reports
-    // not-implemented rather than a mismatch.
-    std::string line2 = dispatch("step", Json::object(), Json::integer(5), STATE_PARKED);
+    // A parked-class request whose handler is not yet implemented (breakpoint_add
+    // arrives in Slice 6) succeeds the mode check while parked, so it reports
+    // not-implemented rather than a mismatch. (Must be a method whose handler is
+    // still a stub: dispatching an *implemented* state-touching tool here would
+    // invoke the real emulator-state bridge — not what this pure test wants.)
+    std::string line2 = dispatch("breakpoint_add", Json::object(), Json::integer(5), STATE_PARKED);
     Json r2;
     ASSERT_TRUE(Json::parse(line2, r2));
     ASSERT_NE(r2.find("error"), nullptr);
@@ -439,6 +441,72 @@ TEST(Mcp, FormatDisasmTruncationFlag)
     out.addr_valid = true; out.big = true;
     Json r = format_disasm(req, out);
     EXPECT_TRUE(r.find("truncated")->asBool());
+}
+
+// -- execution control (Slice 5) -------------------------------------------
+
+TEST(Mcp, FormatExecStepStaysParked)
+{
+    // A plain single step stays parked and reports the new CS:EIP.
+    ExecResult out;
+    out.resumed = false; out.ran = 0;
+    out.cs = 0xf000; out.eip = 0x0000e05b; out.state = STATE_PARKED;
+
+    Json r = format_exec(EXEC_STEP, out);
+    EXPECT_EQ(r.find("op")->asString(), "step");
+    EXPECT_EQ(r.find("state")->asString(), "parked");
+    EXPECT_FALSE(r.find("resumed")->asBool());
+    EXPECT_EQ(r.find("ran")->asInt(), 0);
+    EXPECT_EQ(r.find("cs")->asString(), "0xf000");
+    EXPECT_EQ(r.find("eip")->asString(), "0x0000e05b");
+}
+
+TEST(Mcp, FormatExecContinueResumes)
+{
+    // continue releases the guest to free-run.
+    ExecResult out;
+    out.resumed = true; out.ran = -1;
+    out.cs = 0x1234; out.eip = 0x00000010; out.state = STATE_RUNNING;
+
+    Json r = format_exec(EXEC_CONTINUE, out);
+    EXPECT_EQ(r.find("op")->asString(), "continue");
+    EXPECT_EQ(r.find("state")->asString(), "running");
+    EXPECT_TRUE(r.find("resumed")->asBool());
+    EXPECT_EQ(r.find("ran")->asInt(), -1);
+}
+
+TEST(Mcp, FormatExecOpNames)
+{
+    ExecResult out;
+    out.resumed = false; out.ran = 0; out.cs = 0; out.eip = 0;
+    out.state = STATE_PARKED;
+    EXPECT_EQ(format_exec(EXEC_STEP_OVER, out).find("op")->asString(), "step_over");
+    out.state = STATE_RUNNING; out.resumed = false;
+    EXPECT_EQ(format_exec(EXEC_BREAK, out).find("op")->asString(), "break");
+}
+
+TEST(Mcp, FormatExecBounded)
+{
+    ExecResult out;
+    out.resumed = false; out.ran = 0;
+    out.cs = 0xffff; out.eip = 0xffffffffu; out.state = STATE_PARKED;
+    std::string body = format_exec(EXEC_STEP, out).serialize();
+    EXPECT_LE(body.size(), MCP_MAX_PAYLOAD);
+}
+
+// step/step_over/continue are parked-class; break is run-class. Mode-mismatch
+// fast-reject must therefore key correctly off the current execution state.
+TEST(Mcp, ExecControlClassification)
+{
+    EXPECT_EQ(classify("step"), CLS_PARKED);
+    EXPECT_EQ(classify("step_over"), CLS_PARKED);
+    EXPECT_EQ(classify("continue"), CLS_PARKED);
+    EXPECT_EQ(classify("break"), CLS_RUN);
+
+    EXPECT_FALSE(mode_matches(CLS_PARKED, STATE_RUNNING)); // step while running -> reject
+    EXPECT_TRUE(mode_matches(CLS_PARKED, STATE_PARKED));
+    EXPECT_FALSE(mode_matches(CLS_RUN, STATE_PARKED));     // break while parked -> reject
+    EXPECT_TRUE(mode_matches(CLS_RUN, STATE_RUNNING));
 }
 
 } // namespace

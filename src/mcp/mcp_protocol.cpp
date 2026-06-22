@@ -353,6 +353,33 @@ Json format_disasm(const DisasmRequest &req, const DisasmResult &out) {
     return r;
 }
 
+// -- execution control (Slice 5) -------------------------------------------
+
+namespace {
+const char *exec_op_name(ExecOp op) {
+    switch (op) {
+        case EXEC_STEP:      return "step";
+        case EXEC_STEP_OVER: return "step_over";
+        case EXEC_CONTINUE:  return "continue";
+        case EXEC_BREAK:     return "break";
+    }
+    return "step";
+}
+} // namespace
+
+Json format_exec(ExecOp op, const ExecResult &out) {
+    Json r = Json::object();
+    r.set("op", Json::str(exec_op_name(op)));
+    r.set("state", Json::str(state_name(out.state)));
+    /* resumed=true: the guest was released to free-run; poll ping until parked.
+     * resumed=false: still parked; cs:eip below are the new stop. */
+    r.set("resumed", Json::boolean(out.resumed));
+    r.set("ran", Json::integer((long long)out.ran));
+    r.set("cs", Json::str(hex(out.cs, 4)));
+    r.set("eip", Json::str(hex(out.eip, 8)));
+    return r;
+}
+
 std::string dispatch(const std::string &method, const Json &params,
                      const Json &id, ExecState state) {
     (void)params;
@@ -390,6 +417,21 @@ std::string dispatch(const std::string &method, const Json &params,
         DisasmResult out;
         disassemble(req, out);
         return enforce_max_payload(id, make_result(id, format_disasm(req, out)));
+    }
+    if (method == "step" || method == "step_over" || method == "continue") {
+        /* Parked-class: mode_matches guaranteed STATE_PARKED above. */
+        ExecOp op = method == "step"      ? EXEC_STEP :
+                    method == "step_over" ? EXEC_STEP_OVER : EXEC_CONTINUE;
+        ExecResult out;
+        exec_control(op, out);
+        return enforce_max_payload(id, make_result(id, format_exec(op, out)));
+    }
+    if (method == "break") {
+        /* Run-class: mode_matches guaranteed STATE_RUNNING above, so the guest
+         * is free-running and engaging the debugger is valid. */
+        ExecResult out;
+        exec_control(EXEC_BREAK, out);
+        return enforce_max_payload(id, make_result(id, format_exec(EXEC_BREAK, out)));
     }
 
     /* Known method whose handler arrives in a later slice. */

@@ -4339,6 +4339,77 @@ int32_t DEBUG_Run(int32_t amount,bool quickexit) {
 	return ret;
 }
 
+#if C_MCP
+/* MCP execution-control bridge (Slice 5): the single entry point through which
+ * the MCP module drives execution. It performs one execution-control primitive
+ * on the emulator thread, reusing the exact debugger primitives the F11 (trace
+ * into), F10 (step over), F5 (run) key handlers and -break-start use. It lives
+ * here rather than in src/mcp/ because it manipulates debugger statics that are
+ * not (and should not be) exported — `debugging`, `exitLoop`,
+ * `mustCompleteInstruction`, and the static StepOver(). This is the only core
+ * edit Slice 5 adds, and it compiles away entirely without --enable-mcp.
+ *
+ *   mode 0 = step       : trace into one instruction, stay parked (F11);
+ *   mode 1 = step_over  : over a call/int/loop/rep (else a plain single step) (F10);
+ *   mode 2 = continue   : release the guest to free-run until the next stop (F5);
+ *   mode 3 = break      : engage the debugger on a free-running guest (-break-start).
+ *
+ * Returns the int32_t DEBUG_Run status (0 for break). *resumed is set true when
+ * the guest was released to free-run (continue, step-over-a-call, break) and
+ * false when execution stayed parked (plain single step). See
+ * docs/MCP_BUILD_PLAN.md (Slice 5). */
+Bits DEBUG_NullCPUCore(void);
+Bitu DEBUG_EnableDebugger(void);
+
+int32_t MCP_DebugExec(int mode, bool *resumed) {
+	int32_t ret = 0;
+	bool released = false;
+
+	switch (mode) {
+	case 0: /* step (trace into) */
+		exitLoop = false;
+		mustCompleteInstruction = true;
+		ret = DEBUG_Run(1, true);
+		mustCompleteInstruction = false;
+		break;
+
+	case 1: /* step over */
+		if (StepOver()) {
+			mustCompleteInstruction = true;
+			inhibit_int_breakpoint = true;
+			ret = DEBUG_Run(1, false);
+			inhibit_int_breakpoint = false;
+			mustCompleteInstruction = false;
+			released = true; /* runs until the temp breakpoint after the call */
+		} else {
+			/* not a call/int/loop/rep — same as a plain single step */
+			exitLoop = false;
+			mustCompleteInstruction = true;
+			ret = DEBUG_Run(1, true);
+			mustCompleteInstruction = false;
+		}
+		break;
+
+	case 2: /* continue (run) */
+		debugging = false;
+		inhibit_int_breakpoint = true;
+		ret = DEBUG_Run(1, false);
+		if (cpudecoder == DEBUG_NullCPUCore)
+			ret = -1; /* DEBUG_Loop() must exit */
+		inhibit_int_breakpoint = false;
+		released = true;
+		break;
+
+	case 3: /* break */
+		DEBUG_EnableDebugger();
+		break;
+	}
+
+	if (resumed) *resumed = released;
+	return ret;
+}
+#endif
+
 #ifdef WIN32
 /* Translate VT escape sequences into ncurses KEY_* constants. Needed because
    we set ENABLE_VIRTUAL_TERMINAL_INPUT on the debugger console input handle

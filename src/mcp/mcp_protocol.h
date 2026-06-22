@@ -187,6 +187,38 @@ Json format_disasm(const DisasmRequest &req, const DisasmResult &out);
  * Touches emulator memory, so it must run on the emulator thread while parked. */
 void disassemble(const DisasmRequest &req, DisasmResult &out);
 
+/* ---- execution control (Slice 5) ----------------------------------------
+ *
+ * step / step_over / continue / break. Unlike the read-only Slice 3/4 bridges
+ * these *drive* execution, so the bridge (mcp_execution.cpp) mutates debugger
+ * state via the single core edit MCP_DebugExec (debug.cpp). The classification
+ * and the stop-report formatting stay pure here. step/step_over/continue are
+ * parked-class; break is run-class (it engages the debugger on a running guest).
+ */
+
+enum ExecOp { EXEC_STEP, EXEC_STEP_OVER, EXEC_CONTINUE, EXEC_BREAK };
+
+/* The outcome of one execution-control op, read back on the emulator thread.
+ * `resumed` is true when the guest was released to free-run (continue,
+ * step-over-a-call, break) — the caller then polls `ping` until parked again;
+ * false when execution stayed parked (a plain single step), in which case
+ * cs:eip already point at the new stop. `ran` is the DEBUG_Run status. `state`
+ * is the execution state immediately after the op. */
+struct ExecResult {
+    bool      resumed;
+    int32_t   ran;
+    uint16_t  cs;
+    uint32_t  eip;
+    ExecState state;
+};
+
+/* Bridge (mcp_execution.cpp): perform the op on the emulator thread (parked for
+ * step/step_over/continue; running for break) and read back the result. */
+void exec_control(ExecOp op, ExecResult &out);
+
+/* Pure: format an execution-control outcome as a compact, bounded stop report. */
+Json format_exec(ExecOp op, const ExecResult &out);
+
 /* Pure dispatch: given a parsed request and the current execution state, return
  * the full response line. Handles unknown methods, mode-mismatch fast-reject,
  * and the ping / server_info handlers. State-touching handlers (later slices)

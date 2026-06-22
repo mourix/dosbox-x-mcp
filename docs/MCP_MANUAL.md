@@ -17,6 +17,20 @@ error. The flag defines `C_MCP`; with the flag off, none of the MCP code is buil
 (isolation). The canonical way to build + verify is `scripts/mcp-check.sh`, which builds
 both with and without the flag and runs the test suite headless.
 
+## Headless launch & integration harness
+
+MCP runs the emulator **headless** by exporting `SDL_VIDEODRIVER=dummy` +
+`SDL_AUDIODRIVER=dummy` (no window, no display/tty). `scripts/mcp_harness.py` is the
+stdlib-only Python launcher that does this and owns the process lifecycle with bounded
+timeouts; per-slice integration scripts build on it and `scripts/mcp-check.sh` runs them.
+
+Slice 1's integration test (`scripts/mcp_slice1_screenshot.py`) verifies that the
+capture path produces a PNG under the dummy video driver. It uses a temporary
+self-test hook gated behind the `MCP_SELFTEST_SCREENSHOT` env var (with optional
+`MCP_SELFTEST_FRAMES`): when set, the emulator requests one screenshot after the guest
+boots. This is scaffolding to de-risk the screen pillar — the real screen tools
+(`screen_hash`, `read_screen`, `take_screenshot`) arrive in Slices 9–10.
+
 ## Mental model
 
 - DOSBox-X emulates a full PC. The MCP server exposes the **built-in debugger**

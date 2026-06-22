@@ -142,3 +142,4 @@ contrib/macos/dosbox-x.plist
 /dosbox-x.conf
 /src/dosbox-x.conf
 .claude/settings.local.json
+__pycache__/

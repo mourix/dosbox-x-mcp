@@ -5892,6 +5892,13 @@ bool gfx_in_mapper = false;
 
 void GFX_Events() {
     CheckMapperKeyboardLayout();
+#if C_MCP
+    /* MCP run-class service point (single core call site; see core-edit
+     * manifest in docs/MCP_BUILD_PLAN.md). Slice 1: env-gated screenshot
+     * self-test. Slice 2: drains the run-class request queue here. */
+    void MCP_GFXFrameService(void);
+    MCP_GFXFrameService();
+#endif
 #if defined(C_SDL2) /* SDL 2.x---------------------------------- */
     //Don't poll too often. This can be heavy on the OS, especially Macs.
     //In idle mode 3000-4000 polls are done per second without this check.

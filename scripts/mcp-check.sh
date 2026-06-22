@@ -85,6 +85,10 @@ grep -q '^#define C_MCP 1' config.h || fail "C_MCP not defined in config.h after
 run_tests "running unit + baseline test suite (headless)"
 run_tests "running Mcp.* smoke test (headless)" --gtest_filter=Mcp.*
 
+# 3b. Integration tests (scripted, out-of-process) against the --enable-mcp build.
+log "running integration test #1: headless screenshot (Slice 1)"
+python3 scripts/mcp_slice1_screenshot.py || fail "integration test #1 (headless screenshot) failed"
+
 # 4. Isolation proof: the core must still build with the flag OFF.
 if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
     build

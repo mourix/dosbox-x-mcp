@@ -91,7 +91,7 @@ glance. Adding a core edit means adding a line here with its justification.
 | Edit | File | Why unavoidable |
 | --- | --- | --- |
 | `--enable-mcp` flag → `C_DEBUG` | `configure.ac`, `src/Makefile.am` | build wiring (Slice 0) |
-| Dispatcher drain (run-class) | `GFX_Events()`, `sdlmain.cpp:5893` | service `run`-class requests; runs in both normal and debug loops (Slice 2) |
+| Per-frame service call `MCP_GFXFrameService()` | `GFX_Events()`, `sdlmain.cpp:5893` | single `run`-class core call site; introduced in Slice 1 (env-gated screenshot self-test), extended in Slice 2 to drain the run-class queue. Runs in both normal and debug loops. |
 | Dispatcher drain (parked-class) | `DEBUG_Loop`, `debug.cpp:4870` | service `parked`-class requests in the existing poll loop (Slice 2) |
 | Skip ncurses init when headless | `DEBUG_SetupConsole`, `debug.cpp:5790` | leave `dbg.win_main==NULL` so the TUI is a no-op and `initscr` can't fail under no-tty CI (Slice 2) |
 | Guard the parked `getch()` | `DEBUG_CheckKeys`, `debug.cpp:4430` | the one curses call not already null-guarded; skip input scraping when headless (Slice 2) |
@@ -135,6 +135,12 @@ minimal `C_MCP`-guarded hook) and assert a non-empty PNG is written. No MCP tran
 **DoD:** harness is reusable by later slices; `mcp-check.sh` runs it and it passes. If the dummy driver
 does **not** capture, record the fallback (e.g. `SDL_VIDEODRIVER` alternative or offscreen surface)
 before proceeding to Slice 10.
+
+**De-risk outcome (resolved):** ✅ The in-tree SDL1 `dummy` video driver **does** render frames
+under `SDL_VIDEODRIVER=dummy` — `RENDER_EndUpdate` reaches `CAPTURE_AddImage` and a valid PNG is
+written headless. **No fallback needed**; Slice 10 can rely on the dummy driver. Verified by
+`scripts/mcp_slice1_screenshot.py` (run from `scripts/mcp-check.sh`). Harness: `scripts/mcp_harness.py`
+(reusable). Trigger: temporary `MCP_GFXFrameService()` self-test gated by `MCP_SELFTEST_SCREENSHOT`.
 
 ## Slice 2 — TCP JSON-RPC server + dispatcher + `ping`
 **Goal:** first over-the-wire round trip; the queue/dispatcher skeleton.

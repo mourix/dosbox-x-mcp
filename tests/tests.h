@@ -26,6 +26,10 @@
 #include "shell_cmds_tests.cpp"
 #include "shell_redirection_tests.cpp"
 
+#if C_MCP
+#include "mcp_smoke_tests.cpp"
+#endif
+
 #else
 //google test code causes problem on win9x, remove them and add empty implementations for linkage.
 

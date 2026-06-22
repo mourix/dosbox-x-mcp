@@ -8,6 +8,15 @@ themselves (the single source of truth) — this manual does not duplicate schem
 > Status: **stub.** The MCP server does not exist yet. Fill in each section as tools
 > land. Keep workflows here in sync with the implemented tools; update on every feature.
 
+## Build flag
+
+The MCP server is compiled in only when DOSBox-X is configured with `--enable-mcp`
+(Linux only). It **requires** the built-in debugger, so `--enable-debug` (or
+`--enable-debug=heavy`) must also be passed — `--enable-mcp` on its own is a configure
+error. The flag defines `C_MCP`; with the flag off, none of the MCP code is built
+(isolation). The canonical way to build + verify is `scripts/mcp-check.sh`, which builds
+both with and without the flag and runs the test suite headless.
+
 ## Mental model
 
 - DOSBox-X emulates a full PC. The MCP server exposes the **built-in debugger**

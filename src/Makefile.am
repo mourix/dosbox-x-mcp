@@ -54,6 +54,11 @@ dosbox_x_LDADD +=  gamelink/libgamelink.a
 endif
 endif
 
+if C_MCP
+SUBDIRS += mcp
+dosbox_x_LDADD += mcp/libmcp.a
+endif
+
 if C_DIRECT3D
 dosbox_x_LDADD += output/direct3d/liboutputdirect3d.a
 endif

@@ -1150,10 +1150,26 @@ AC_ARG_ENABLE(debug,AC_HELP_STRING([--enable-debug],[Enable debug mode]),[
      if test x$enable_debug = xheavy ; then 
        AC_DEFINE(C_HEAVY_DEBUG,1)
      fi
-   else 
+   else
      AC_MSG_ERROR([Can't find curses, which is required for debug mode])
    fi
 ],)
+
+dnl FEATURE: MCP server (Model Context Protocol) bridge over the debugger.
+dnl Additive to this fork (mourix/dosbox-x-mcp) only; requires the debugger (C_DEBUG)
+dnl because it drives the debugger's state. See docs/MCP_BUILD_PLAN.md (Slice 0).
+AH_TEMPLATE(C_MCP,[Define to 1 to enable the MCP server (requires C_DEBUG)])
+AC_ARG_ENABLE(mcp,AC_HELP_STRING([--enable-mcp],[Enable the MCP server (requires --enable-debug)]),[
+   if test x$enable_mcp = xno; then
+     AC_MSG_RESULT([MCP server not enabled])
+   elif test x$enable_debug != x -a x$enable_debug != xno; then
+     AC_DEFINE(C_MCP,1)
+     AC_MSG_RESULT([MCP server enabled])
+   else
+     AC_MSG_ERROR([--enable-mcp requires --enable-debug])
+   fi
+],[enable_mcp=no])
+AM_CONDITIONAL([C_MCP], [test "x$enable_mcp" = "xyes"])
 
 dnl automake 1.14 and upwards rewrite the host to have always 64 bit unless i386 as host is passed
 dnl this can make building a 32 bit executable a bit tricky, as dosbox relies on the host to select the
@@ -1567,6 +1583,7 @@ src/libs/mt32/Makefile
 src/libs/xBRZ/Makefile
 src/libs/fluidsynth/Makefile
 src/libs/decoders/internal/Makefile
+src/mcp/Makefile
 src/output/Makefile
 src/output/direct3d/Makefile
 src/builtin/Makefile

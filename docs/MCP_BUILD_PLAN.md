@@ -96,6 +96,7 @@ glance. Adding a core edit means adding a line here with its justification.
 | Guard the parked `getch()` | `DEBUG_CheckKeys`, `debug.cpp:4430` | `if (dbg.win_main==NULL) return 0;` under `#if C_MCP` — the one curses call not already null-guarded; the MCP queue is the input source instead (Slice 2). |
 | Skip the no-tty guard in `DEBUG_Enable_Handler` | `debug.cpp:5015` | The Linux/macOS branch returns early (debugger "not available") when stdin/stdout/stderr aren't a terminal, so `-break-start` would never park under the headless harness (pipes, no tty). Compiled out under `#if ... && !C_MCP`: the MCP build has no ncurses TUI and its input source is the request queue, so the debugger must engage headless (Slice 3). |
 | Execution-control entry point `MCP_DebugExec()` | `debug.cpp` (after `DEBUG_Run`) | one `#if C_MCP` function the MCP module calls to drive step/step_over/continue/break (Slice 5). It must live in `debug.cpp` because it manipulates debugger statics that are not exported — `debugging`, `exitLoop`, `mustCompleteInstruction`, and the static `StepOver()` — and it reuses the exact primitives the F11/F10/F5 key handlers and `-break-start` use (`DEBUG_Run`, `DEBUG_EnableDebugger`). Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
+| Breakpoint bridge `MCP_Breakpoint{Add,Delete,Count,Get}()` + two `CBreakpoint` friend decls | `debug.cpp` (after `MCP_DebugExec`; friends near `BPoints`) | `#if C_MCP` free functions the MCP module calls for breakpoint_list/add/delete (Slice 6). They must live in `debug.cpp` because the breakpoint store (`CBreakpoint` and its private static `BPoints`) is not exported. Add/Delete reuse the public `CBreakpoint::Add*`/`DeleteByIndex`/`DeleteAll` API the BP/BPINT/BPM/BPDEL commands use; the two list-readers need `BPoints`, so they are `friend`s of `CBreakpoint` (the same pattern as the existing `DEBUG_HeavyIsBreakpoint` friend). Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
 
 ## Test strategy (two layers)
 
@@ -257,6 +258,27 @@ fast-rejects (step-while-running, break-while-parked); wired into `scripts/mcp-c
 / `ShowList`; expose the 6 `EBreakpoint` types; `list` is bounded.
 **Tests:** integration — add exec bp, continue, assert stop; add INT bp; delete by index; list reflects state.
 **DoD:** `mcp-check.sh` green.
+
+**Outcome (resolved):** ✅ Shipped. Same reader/formatter split as the other state slices, with
+the side-effecting primitive in `debug.cpp` (the Slice 6 core edit above) because the breakpoint
+store is debugger-private. The thin bridge `src/mcp/mcp_breakpoints.cpp` marshals the parsed
+request into `MCP_BreakpointAdd`/`MCP_BreakpointDelete` and reads the list back via
+`MCP_BreakpointCount`/`MCP_BreakpointGet` (plain out-params, no shared struct — keeping
+`debug.cpp` free of MCP headers, like Slice 5). The pure layer (`mcp_protocol.cpp`) owns param
+parsing (`parse_bp_add_request`, `parse_bp_type`) and JSON formatting (`format_breakpoint`,
+`format_breakpoint_list`); the `BpType` enum mirrors `EBreakpoint` by value so the integer crossing
+the bridge is unambiguous. All six breakpoint types are exposed — `exec` (BKPNT_PHYSICAL), `int`
+(interrupt, with `ah`/`al` match or `*`=all), and the four memory watches `mem`/`mem_prot`/
+`mem_linear`/`mem_freeze` (the watched byte is seeded with the current value on add). `breakpoint_list`
+is bounded to `MCP_LIST_MAX` (256) with `count`/`total`/`truncated`. All three tools are parked-class.
+Unit tests: `tests/mcp_protocol_tests.cpp` (`Mcp.BreakpointTypeNames`, `Mcp.ParseBpAdd*`,
+`Mcp.FormatBreakpoint*`, `Mcp.BreakpointClassification`) cover type mapping, param parsing/rejection,
+formatting of each type family, list bounding/counts, the payload bound, and classification.
+Integration: `scripts/mcp_slice6_breakpoints.py` boots headless with `-break-start` and asserts
+list/add/delete mechanics (add exec + INT, delete-by-index keeps the other, delete-all empties,
+bad-param `-32602`), then proves an exec breakpoint stops a continuing guest (control-flow-robust
+fall-through search) and an `INT 10h` breakpoint stops it during POST; wired into
+`scripts/mcp-check.sh` (integration test #6).
 
 ## Slice 7 — Writes: `write_register` / `write_memory`
 **Goal:** mutate state.

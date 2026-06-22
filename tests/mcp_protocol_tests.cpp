@@ -142,12 +142,12 @@ TEST(Mcp, DispatchModeMismatchCarriesCurrentState)
     EXPECT_EQ(err->find("code")->asInt(), MCP_ERR_MODE_MISMATCH);
     EXPECT_EQ(err->find("data")->find("state")->asString(), "running");
 
-    // A parked-class request whose handler is not yet implemented (breakpoint_add
-    // arrives in Slice 6) succeeds the mode check while parked, so it reports
+    // A parked-class request whose handler is not yet implemented (write_register
+    // arrives in Slice 7) succeeds the mode check while parked, so it reports
     // not-implemented rather than a mismatch. (Must be a method whose handler is
     // still a stub: dispatching an *implemented* state-touching tool here would
     // invoke the real emulator-state bridge — not what this pure test wants.)
-    std::string line2 = dispatch("breakpoint_add", Json::object(), Json::integer(5), STATE_PARKED);
+    std::string line2 = dispatch("write_register", Json::object(), Json::integer(5), STATE_PARKED);
     Json r2;
     ASSERT_TRUE(Json::parse(line2, r2));
     ASSERT_NE(r2.find("error"), nullptr);
@@ -507,6 +507,190 @@ TEST(Mcp, ExecControlClassification)
     EXPECT_TRUE(mode_matches(CLS_PARKED, STATE_PARKED));
     EXPECT_FALSE(mode_matches(CLS_RUN, STATE_PARKED));     // break while parked -> reject
     EXPECT_TRUE(mode_matches(CLS_RUN, STATE_RUNNING));
+}
+
+// -- breakpoints (Slice 6) -------------------------------------------------
+
+TEST(Mcp, BreakpointTypeNames)
+{
+    EXPECT_STREQ(bp_type_name(BPT_EXEC), "exec");
+    EXPECT_STREQ(bp_type_name(BPT_INT), "int");
+    EXPECT_STREQ(bp_type_name(BPT_MEM), "mem");
+    EXPECT_STREQ(bp_type_name(BPT_MEM_PROT), "mem_prot");
+    EXPECT_STREQ(bp_type_name(BPT_MEM_LINEAR), "mem_linear");
+    EXPECT_STREQ(bp_type_name(BPT_MEM_FREEZE), "mem_freeze");
+    EXPECT_STREQ(bp_type_name(BPT_UNKNOWN), "unknown");
+
+    BpType t;
+    EXPECT_TRUE(parse_bp_type("exec", t));       EXPECT_EQ(t, BPT_EXEC);
+    EXPECT_TRUE(parse_bp_type("mem_freeze", t)); EXPECT_EQ(t, BPT_MEM_FREEZE);
+    EXPECT_FALSE(parse_bp_type("bogus", t));
+
+    // BpType mirrors debug.cpp's EBreakpoint by value (the integer that crosses
+    // the bridge): UNKNOWN=0, EXEC=1, INT=2, MEM=3, ... FREEZE=6.
+    EXPECT_EQ((int)BPT_UNKNOWN, 0);
+    EXPECT_EQ((int)BPT_EXEC, 1);
+    EXPECT_EQ((int)BPT_INT, 2);
+    EXPECT_EQ((int)BPT_MEM_FREEZE, 6);
+}
+
+TEST(Mcp, ParseBpAddDefaultsExec)
+{
+    // type defaults to exec; seg+off required; accepts hex strings.
+    Json p = Json::object();
+    p.set("seg", Json::str("0xf000"));
+    p.set("off", Json::str("0xfff0"));
+    BpAddRequest req; std::string err;
+    ASSERT_TRUE(parse_bp_add_request(p, req, err)) << err;
+    EXPECT_EQ(req.type, BPT_EXEC);
+    EXPECT_EQ(req.seg, 0xf000);
+    EXPECT_EQ(req.off, 0xfff0u);
+    EXPECT_FALSE(req.once);
+    EXPECT_EQ(req.ah, -1);
+    EXPECT_EQ(req.al, -1);
+}
+
+TEST(Mcp, ParseBpAddInterrupt)
+{
+    // int needs the vector; ah/al optional, default -1 (all).
+    Json p = Json::object();
+    p.set("type", Json::str("int"));
+    p.set("int", Json::integer(0x21));
+    p.set("ah", Json::str("0x4c"));
+    BpAddRequest req; std::string err;
+    ASSERT_TRUE(parse_bp_add_request(p, req, err)) << err;
+    EXPECT_EQ(req.type, BPT_INT);
+    EXPECT_EQ(req.intnr, 0x21);
+    EXPECT_EQ(req.ah, 0x4c);
+    EXPECT_EQ(req.al, -1);   // unspecified -> all
+
+    Json p2 = Json::object();
+    p2.set("type", Json::str("int"));
+    BpAddRequest r2; std::string e2;
+    EXPECT_FALSE(parse_bp_add_request(p2, r2, e2));  // missing int number
+}
+
+TEST(Mcp, ParseBpAddLinearAndOnce)
+{
+    Json p = Json::object();
+    p.set("type", Json::str("mem_linear"));
+    p.set("lin", Json::str("0xb8000"));
+    p.set("once", Json::boolean(true));
+    BpAddRequest req; std::string err;
+    ASSERT_TRUE(parse_bp_add_request(p, req, err)) << err;
+    EXPECT_EQ(req.type, BPT_MEM_LINEAR);
+    EXPECT_EQ(req.off, 0xb8000u);
+    EXPECT_TRUE(req.once);
+
+    Json p2 = Json::object();    // mem_linear without lin -> reject
+    p2.set("type", Json::str("mem_linear"));
+    BpAddRequest r2; std::string e2;
+    EXPECT_FALSE(parse_bp_add_request(p2, r2, e2));
+
+    Json p3 = Json::object();    // unknown type -> reject
+    p3.set("type", Json::str("nope"));
+    BpAddRequest r3; std::string e3;
+    EXPECT_FALSE(parse_bp_add_request(p3, r3, e3));
+}
+
+TEST(Mcp, FormatBreakpointExecAndInt)
+{
+    BreakpointInfo e;
+    e.index = 0; e.type = BPT_EXEC; e.seg = 0x1234; e.off = 0x00000100;
+    e.intnr = 0; e.ah = -1; e.al = -1; e.memvalue = -1;
+    e.once = true; e.active = true;
+    Json je = format_breakpoint(e);
+    EXPECT_EQ(je.find("type")->asString(), "exec");
+    EXPECT_EQ(je.find("seg")->asString(), "0x1234");
+    EXPECT_EQ(je.find("off")->asString(), "0x00000100");
+    EXPECT_TRUE(je.find("once")->asBool());
+    EXPECT_TRUE(je.find("active")->asBool());
+    EXPECT_EQ(je.find("index")->asInt(), 0);
+    EXPECT_TRUE(je.find("value") == nullptr);   // exec has no watched value
+
+    BreakpointInfo i;
+    i.index = 1; i.type = BPT_INT; i.seg = 0; i.off = 0;
+    i.intnr = 0x21; i.ah = 0x4c; i.al = -1; i.memvalue = -1;
+    i.once = false; i.active = true;
+    Json ji = format_breakpoint(i);
+    EXPECT_EQ(ji.find("type")->asString(), "int");
+    EXPECT_EQ(ji.find("int")->asString(), "0x21");
+    EXPECT_EQ(ji.find("ah")->asString(), "0x4c");
+    EXPECT_EQ(ji.find("al")->asString(), "*");   // -1 renders as "match all"
+}
+
+TEST(Mcp, FormatBreakpointMemValue)
+{
+    BreakpointInfo m;
+    m.index = 2; m.type = BPT_MEM; m.seg = 0x40; m.off = 0x0000006c;
+    m.intnr = 0; m.ah = -1; m.al = -1; m.memvalue = 0xab;
+    m.once = false; m.active = true;
+    Json jm = format_breakpoint(m);
+    EXPECT_EQ(jm.find("type")->asString(), "mem");
+    EXPECT_EQ(jm.find("value")->asString(), "0xab");
+
+    BreakpointInfo l;
+    l.index = 3; l.type = BPT_MEM_LINEAR; l.seg = 0; l.off = 0xb8000;
+    l.intnr = 0; l.ah = -1; l.al = -1; l.memvalue = 0x07;
+    l.once = false; l.active = true;
+    Json jl = format_breakpoint(l);
+    EXPECT_EQ(jl.find("lin")->asString(), "0x000b8000");
+    EXPECT_EQ(jl.find("value")->asString(), "0x07");
+    EXPECT_TRUE(jl.find("seg") == nullptr);
+}
+
+TEST(Mcp, FormatBreakpointListBoundedAndCounts)
+{
+    std::vector<BreakpointInfo> bps;
+    for (int i = 0; i < 5; i++) {
+        BreakpointInfo b;
+        b.index = i; b.type = BPT_EXEC; b.seg = 0x1000; b.off = (uint32_t)i;
+        b.intnr = 0; b.ah = -1; b.al = -1; b.memvalue = -1;
+        b.once = false; b.active = true;
+        bps.push_back(b);
+    }
+    // Cap at 3: list reports 3 shown, 5 total, truncated.
+    Json r = format_breakpoint_list(bps, 3);
+    EXPECT_EQ(r.find("count")->asInt(), 3);
+    EXPECT_EQ(r.find("total")->asInt(), 5);
+    EXPECT_TRUE(r.find("truncated")->asBool());
+    ASSERT_TRUE(r.find("breakpoints")->isArray());
+
+    // Within cap: not truncated.
+    Json r2 = format_breakpoint_list(bps, MCP_LIST_MAX);
+    EXPECT_EQ(r2.find("count")->asInt(), 5);
+    EXPECT_FALSE(r2.find("truncated")->asBool());
+
+    // Empty list is well-formed.
+    std::vector<BreakpointInfo> none;
+    Json r3 = format_breakpoint_list(none, MCP_LIST_MAX);
+    EXPECT_EQ(r3.find("count")->asInt(), 0);
+    EXPECT_EQ(r3.find("total")->asInt(), 0);
+    EXPECT_FALSE(r3.find("truncated")->asBool());
+}
+
+TEST(Mcp, FormatBreakpointListWithinCeiling)
+{
+    // A full page of breakpoints must stay under the 64 KiB ceiling.
+    std::vector<BreakpointInfo> bps;
+    for (size_t i = 0; i < MCP_LIST_MAX; i++) {
+        BreakpointInfo b;
+        b.index = (int)i; b.type = BPT_INT; b.seg = 0; b.off = 0;
+        b.intnr = 0x21; b.ah = 0x4c; b.al = 0x00; b.memvalue = -1;
+        b.once = false; b.active = true;
+        bps.push_back(b);
+    }
+    std::string body = format_breakpoint_list(bps, MCP_LIST_MAX).serialize();
+    EXPECT_LE(body.size(), MCP_MAX_PAYLOAD);
+}
+
+TEST(Mcp, BreakpointClassification)
+{
+    EXPECT_EQ(classify("breakpoint_list"), CLS_PARKED);
+    EXPECT_EQ(classify("breakpoint_add"), CLS_PARKED);
+    EXPECT_EQ(classify("breakpoint_delete"), CLS_PARKED);
+    EXPECT_FALSE(mode_matches(CLS_PARKED, STATE_RUNNING)); // rejected while running
+    EXPECT_TRUE(mode_matches(CLS_PARKED, STATE_PARKED));
 }
 
 } // namespace

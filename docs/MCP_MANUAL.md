@@ -7,8 +7,9 @@ themselves (the single source of truth) — this manual does not duplicate schem
 
 > Status: **early.** The transport is live (Slice 2): a TCP JSON-RPC server with
 > `ping` / `server_info`. State-touching tools landed so far: `read_registers` (Slice 3),
-> `read_memory` + `disassemble` (Slice 4), and execution control `step` / `step_over` /
-> `continue` / `break` (Slice 5). Remaining tools land in later slices. Keep workflows here
+> `read_memory` + `disassemble` (Slice 4), execution control `step` / `step_over` /
+> `continue` / `break` (Slice 5), and breakpoints `breakpoint_list` / `breakpoint_add` /
+> `breakpoint_delete` (Slice 6). Remaining tools land in later slices. Keep workflows here
 > in sync with the implemented tools; update on every feature.
 
 ## Build flag
@@ -71,9 +72,10 @@ The emulator is either **running** (CPU free-running; the game executes) or **pa
 If you send a parked-class tool while running (or vice-versa) you get the `-32001`
 mismatch error telling you the current state; switch with `break` / `continue` first.
 (Implemented so far: the `any`-class `ping` / `server_info`; the parked-class
-`read_registers`, `read_memory`, `disassemble`, `step`, `step_over`, `continue`; and the
-run-class `break`. The remaining tools are already classified so mismatches are reported
-correctly, but their handlers land in later slices.)
+`read_registers`, `read_memory`, `disassemble`, `step`, `step_over`, `continue`,
+`breakpoint_list`, `breakpoint_add`, `breakpoint_delete`; and the run-class `break`. The
+remaining tools are already classified so mismatches are reported correctly, but their
+handlers land in later slices.)
 
 ## Mental model
 
@@ -144,6 +146,31 @@ Mode matters: `step`/`step_over`/`continue` while running, or `break` while park
 the `-32001` mismatch error (with `data.state`) instead of blocking — check `ping` / the
 last stop report for the current state and switch first. The general loop is **break (or
 `-break-start`) → inspect → step/step_over → inspect → continue → poll until parked**.
+
+### Breakpoints
+Three **parked**-class tools manage the debugger's breakpoint list (`break` or launch
+`-break-start` first). A breakpoint fires while the guest free-runs after `continue`, which
+re-parks it at the stop — so the loop is **add breakpoint → continue → poll `ping` until
+parked → inspect**.
+
+- **`breakpoint_add`** takes a `type` (default `exec`) and the fields that type needs:
+  - `exec` — break when execution reaches a code address. `seg`+`off` (hex strings or ints).
+  - `int` — break on a software interrupt. `int` (the vector, e.g. `0x21`) plus optional
+    `ah` / `al` match values; omit either to match all (listed back as `*`).
+  - `mem` / `mem_prot` / `mem_freeze` — watch a byte at `seg`+`off` (`mem_prot` is the
+    protected-mode variant; `mem_freeze` keeps re-writing the seeded value). The watched
+    byte is seeded with the current value on add, so the watch fires on the next *change*.
+  - `mem_linear` — watch a byte at a `lin` (linear) address.
+  - optional `once: true` makes it a one-shot (auto-removed when it fires).
+  It replies `{added: true, index, type}`. **`index` is `0`** — new breakpoints go to the
+  front of the list, so the newest is always index 0 and existing indices shift down by one.
+- **`breakpoint_list`** returns `breakpoints` (an array; `index`, `type`, `active`, `once`,
+  and the per-type locator — `seg`/`off`, `lin`, `int`/`ah`/`al`, or a `value` for the mem
+  watches) plus `count` / `total` / `truncated` (the list is bounded to 256 entries/page).
+  A freshly-added breakpoint reads `active: false` until the next `continue` activates it.
+- **`breakpoint_delete`** removes one by `index`, or all with `all: true`; replies
+  `{deleted: <bool>, …}`. Because indices shift on every add/delete, **re-`breakpoint_list`
+  before deleting by index** rather than caching an index across mutations.
 
 ### Typical reverse-engineering loop
 _TODO: load target → break at entry → step → inspect → map behavior → record findings._

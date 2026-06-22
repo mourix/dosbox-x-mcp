@@ -11,9 +11,17 @@ not just game compatibility. Licensed GPLv2.
 
 This checkout is the `mourix/dosbox-x-mcp` fork. The canonical upstream is
 `joncampbell123/dosbox-x` (configured as the `upstream` git remote). Default branch
-is `master`. Note: the working tree may show nearly every file as modified — this is
-line-ending (CRLF) noise from the Windows/WSL checkout, not real changes; don't treat
-it as work in progress.
+is `master`.
+
+**Workflow:** commit all MCP work directly to `master` — do not create feature branches.
+This overrides the default "branch first on the default branch" behavior. Commit/push
+only when asked.
+
+**Line endings:** the CRLF noise has been fixed (LF-converted the `i/lf w/crlf` files
+and set local `core.autocrlf=false`/`core.fileMode=false`); `git status` is clean. If a
+bulk edit ever makes `git status` show spurious "modified" files again, `git diff`
+(content hash) is authoritative — re-run `git add -A` to settle the stat cache. Never
+blanket LF-convert: the ~1235 genuinely-CRLF files (VS `.sln`/`.vcxproj`) must stay CRLF.
 
 ### Goal of this fork
 

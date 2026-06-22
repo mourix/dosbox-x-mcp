@@ -380,6 +380,111 @@ Json format_exec(ExecOp op, const ExecResult &out) {
     return r;
 }
 
+// -- breakpoints (Slice 6) -------------------------------------------------
+
+const char *bp_type_name(BpType t) {
+    switch (t) {
+        case BPT_EXEC:        return "exec";
+        case BPT_INT:         return "int";
+        case BPT_MEM:         return "mem";
+        case BPT_MEM_PROT:    return "mem_prot";
+        case BPT_MEM_LINEAR:  return "mem_linear";
+        case BPT_MEM_FREEZE:  return "mem_freeze";
+        default:              return "unknown";
+    }
+}
+
+bool parse_bp_type(const std::string &s, BpType &out) {
+    if      (s == "exec")       out = BPT_EXEC;
+    else if (s == "int")        out = BPT_INT;
+    else if (s == "mem")        out = BPT_MEM;
+    else if (s == "mem_prot")   out = BPT_MEM_PROT;
+    else if (s == "mem_linear") out = BPT_MEM_LINEAR;
+    else if (s == "mem_freeze") out = BPT_MEM_FREEZE;
+    else return false;
+    return true;
+}
+
+bool parse_bp_add_request(const Json &params, BpAddRequest &req, std::string &err) {
+    req.type = BPT_EXEC;
+    req.seg = 0; req.off = 0; req.intnr = 0;
+    req.ah = -1; req.al = -1; req.once = false;
+
+    const Json *ty = params.find("type");
+    if (ty != nullptr) {
+        if (!ty->isString()) { err = "type must be a string"; return false; }
+        if (!parse_bp_type(ty->asString(), req.type)) {
+            err = "unknown type (want exec|int|mem|mem_prot|mem_linear|mem_freeze): " + ty->asString();
+            return false;
+        }
+    }
+
+    const Json *once = params.find("once");
+    if (once != nullptr) {
+        if (!once->isBool()) { err = "once must be a boolean"; return false; }
+        req.once = once->asBool();
+    }
+
+    if (req.type == BPT_INT) {
+        uint32_t v;
+        if (!json_to_u32(params.find("int"), v)) { err = "missing/invalid int (interrupt number)"; return false; }
+        req.intnr = (uint8_t)v;
+        if (params.has("ah")) {
+            if (!json_to_u32(params.find("ah"), v)) { err = "invalid ah"; return false; }
+            req.ah = (int)(uint8_t)v;
+        }
+        if (params.has("al")) {
+            if (!json_to_u32(params.find("al"), v)) { err = "invalid al"; return false; }
+            req.al = (int)(uint8_t)v;
+        }
+    } else if (req.type == BPT_MEM_LINEAR) {
+        if (!json_to_u32(params.find("lin"), req.off)) { err = "missing/invalid lin"; return false; }
+    } else { /* exec, mem, mem_prot, mem_freeze: seg:off */
+        uint32_t seg;
+        if (!json_to_u32(params.find("seg"), seg)) { err = "missing/invalid seg"; return false; }
+        req.seg = (uint16_t)seg;
+        if (!json_to_u32(params.find("off"), req.off)) { err = "missing/invalid off"; return false; }
+    }
+    return true;
+}
+
+Json format_breakpoint(const BreakpointInfo &bp) {
+    Json o = Json::object();
+    o.set("index", Json::integer((long long)bp.index));
+    o.set("type", Json::str(bp_type_name(bp.type)));
+    o.set("active", Json::boolean(bp.active));
+    o.set("once", Json::boolean(bp.once));
+    if (bp.type == BPT_INT) {
+        o.set("int", Json::str(hex(bp.intnr, 2)));
+        o.set("ah", bp.ah < 0 ? Json::str("*") : Json::str(hex((uint32_t)bp.ah, 2)));
+        o.set("al", bp.al < 0 ? Json::str("*") : Json::str(hex((uint32_t)bp.al, 2)));
+    } else if (bp.type == BPT_MEM_LINEAR) {
+        o.set("lin", Json::str(hex(bp.off, 8)));
+        o.set("value", Json::str(hex((uint32_t)bp.memvalue, 2)));
+    } else if (bp.type == BPT_MEM || bp.type == BPT_MEM_PROT || bp.type == BPT_MEM_FREEZE) {
+        o.set("seg", Json::str(hex(bp.seg, 4)));
+        o.set("off", Json::str(hex(bp.off, 8)));
+        o.set("value", Json::str(hex((uint32_t)bp.memvalue, 2)));
+    } else { /* exec */
+        o.set("seg", Json::str(hex(bp.seg, 4)));
+        o.set("off", Json::str(hex(bp.off, 8)));
+    }
+    return o;
+}
+
+Json format_breakpoint_list(const std::vector<BreakpointInfo> &bps, size_t max) {
+    Json r = Json::object();
+    Json arr = Json::array();
+    size_t n = bps.size();
+    size_t shown = n > max ? max : n;
+    for (size_t i = 0; i < shown; i++) arr.push(format_breakpoint(bps[i]));
+    r.set("breakpoints", arr);
+    r.set("count", Json::integer((long long)shown));
+    r.set("total", Json::integer((long long)n));
+    r.set("truncated", Json::boolean(n > max));
+    return r;
+}
+
 std::string dispatch(const std::string &method, const Json &params,
                      const Json &id, ExecState state) {
     (void)params;
@@ -432,6 +537,48 @@ std::string dispatch(const std::string &method, const Json &params,
         ExecResult out;
         exec_control(EXEC_BREAK, out);
         return enforce_max_payload(id, make_result(id, format_exec(EXEC_BREAK, out)));
+    }
+
+    if (method == "breakpoint_list") {
+        /* Parked-class: mode_matches guaranteed STATE_PARKED above. */
+        std::vector<BreakpointInfo> bps;
+        bp_list(bps);
+        return enforce_max_payload(id, make_result(id, format_breakpoint_list(bps, MCP_LIST_MAX)));
+    }
+    if (method == "breakpoint_add") {
+        BpAddRequest req;
+        std::string perr;
+        if (!parse_bp_add_request(params, req, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        int idx = bp_add(req);
+        if (idx < 0)
+            return make_error(id, MCP_ERR_INTERNAL, "failed to add breakpoint");
+        Json r = Json::object();
+        r.set("added", Json::boolean(true));
+        r.set("index", Json::integer((long long)idx));
+        r.set("type", Json::str(bp_type_name(req.type)));
+        return enforce_max_payload(id, make_result(id, r));
+    }
+    if (method == "breakpoint_delete") {
+        bool all = false;
+        const Json *a = params.find("all");
+        if (a != nullptr) {
+            if (!a->isBool()) return make_error(id, MCP_ERR_INVALID_PARAMS, "all must be a boolean");
+            all = a->asBool();
+        }
+        int index = -1;
+        if (!all) {
+            uint32_t idx;
+            if (!json_to_u32(params.find("index"), idx))
+                return make_error(id, MCP_ERR_INVALID_PARAMS, "missing/invalid index (or set all:true)");
+            index = (int)idx;
+        }
+        bool ok = bp_delete(all ? -1 : index);
+        Json r = Json::object();
+        r.set("deleted", Json::boolean(ok));
+        if (all) r.set("all", Json::boolean(true));
+        else     r.set("index", Json::integer((long long)index));
+        return enforce_max_payload(id, make_result(id, r));
     }
 
     /* Known method whose handler arrives in a later slice. */

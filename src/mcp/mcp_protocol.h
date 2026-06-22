@@ -219,6 +219,67 @@ void exec_control(ExecOp op, ExecResult &out);
 /* Pure: format an execution-control outcome as a compact, bounded stop report. */
 Json format_exec(ExecOp op, const ExecResult &out);
 
+/* ---- breakpoints (Slice 6) ----------------------------------------------
+ *
+ * breakpoint_list / breakpoint_add / breakpoint_delete. Same reader/formatter
+ * split as the other state slices: param parsing + JSON formatting are pure
+ * (here / mcp_protocol.cpp, unit-tested with no boot), while the store mutation
+ * and listing live in the bridge mcp_breakpoints.cpp, which calls the single
+ * core edit (the MCP_Breakpoint* functions in debug.cpp). All three tools are
+ * parked-class. BpType mirrors debug.cpp's EBreakpoint by value so the integer
+ * crossing the bridge is unambiguous (0=unknown,1=exec,...,6=mem_freeze). */
+enum BpType {
+    BPT_UNKNOWN = 0, BPT_EXEC, BPT_INT, BPT_MEM,
+    BPT_MEM_PROT, BPT_MEM_LINEAR, BPT_MEM_FREEZE
+};
+
+/* One breakpoint as listed. For exec/mem* `seg`+`off` locate it (mem_linear uses
+ * `off` as a linear address, seg unused). For int, `intnr` is the vector and
+ * `ah`/`al` are the AH/AL match values with -1 meaning "match all" (BPINT_ALL).
+ * `memvalue` is the watched byte for the mem* types, -1 otherwise. */
+struct BreakpointInfo {
+    int      index;
+    BpType   type;
+    uint16_t seg;
+    uint32_t off;
+    uint8_t  intnr;
+    int      ah;        /* -1 == all */
+    int      al;        /* -1 == all */
+    int      memvalue;  /* -1 == n/a */
+    bool     once;
+    bool     active;
+};
+
+/* A parsed breakpoint_add request. ah/al default to -1 (all) for int types. */
+struct BpAddRequest {
+    BpType   type;
+    uint16_t seg;
+    uint32_t off;
+    uint8_t  intnr;
+    int      ah;
+    int      al;
+    bool     once;
+};
+
+const char *bp_type_name(BpType t);                       /* "exec"/"int"/...  */
+bool        parse_bp_type(const std::string &s, BpType &out);
+
+/* Pure: parse params into req (default type=exec, once=false). Returns false and
+ * sets err on a missing/invalid field or unknown type. */
+bool parse_bp_add_request(const Json &params, BpAddRequest &req, std::string &err);
+
+/* Pure: format one breakpoint / a bounded list (capped at `max`, with count /
+ * total / truncated). */
+Json format_breakpoint(const BreakpointInfo &bp);
+Json format_breakpoint_list(const std::vector<BreakpointInfo> &bps, size_t max);
+
+/* Bridge (mcp_breakpoints.cpp): mutate/read the debugger's breakpoint store on
+ * the emulator thread while parked. bp_add returns the new index or -1; bp_delete
+ * takes an index (< 0 deletes all) and returns success. */
+int  bp_add(const BpAddRequest &req);
+bool bp_delete(int index);
+void bp_list(std::vector<BreakpointInfo> &out);
+
 /* Pure dispatch: given a parsed request and the current execution state, return
  * the full response line. Handles unknown methods, mode-mismatch fast-reject,
  * and the ping / server_info handlers. State-touching handlers (later slices)

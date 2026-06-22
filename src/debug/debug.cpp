@@ -621,6 +621,13 @@ private:
 #if C_HEAVY_DEBUG
 	friend bool DEBUG_HeavyIsBreakpoint(void);
 #endif
+#if C_MCP
+	/* MCP breakpoint bridge (Slice 6): the list-readers need the private BPoints.
+	 * Add/Delete go through the public static API, so only these two are friends.
+	 * See the core-edit manifest in docs/MCP_BUILD_PLAN.md. */
+	friend int  MCP_BreakpointCount(void);
+	friend bool MCP_BreakpointGet(int,int*,uint16_t*,uint32_t*,int*,int*,int*,int*,bool*,bool*);
+#endif
 };
 
 CBreakpoint::CBreakpoint(void):type(BKPNT_UNKNOWN),location(0),
@@ -4407,6 +4414,85 @@ int32_t MCP_DebugExec(int mode, bool *resumed) {
 
 	if (resumed) *resumed = released;
 	return ret;
+}
+
+/* MCP breakpoint bridge (Slice 6): list / add / delete. Like MCP_DebugExec these
+ * free functions live in debug.cpp because the breakpoint store (CBreakpoint and
+ * its private static BPoints list) is not exported. Add/Delete reuse the public
+ * CBreakpoint static API the BP/BPINT/BPM/BPDEL debugger commands use; the two
+ * list-readers are friends of CBreakpoint so they can walk BPoints. The integer
+ * `type` is the EBreakpoint value (UNKNOWN=0, PHYSICAL=1, INTERRUPT=2, MEMORY=3,
+ * MEMORY_PROT=4, MEMORY_LINEAR=5, MEMORY_FREEZE=6); the MCP layer's BpType enum
+ * mirrors it. ah/al == -1 means "match all" (BPINT_ALL). Compiled away without
+ * --enable-mcp. See docs/MCP_BUILD_PLAN.md (Slice 6). */
+int MCP_BreakpointAdd(int type, uint16_t seg, uint32_t off,
+                      uint8_t intnr, int ah, int al, bool once) {
+	switch ((EBreakpoint)type) {
+	case BKPNT_PHYSICAL:
+		CBreakpoint::AddBreakpoint(seg, off, once);
+		return 0; /* push_front: the new breakpoint is index 0 */
+	case BKPNT_INTERRUPT:
+		CBreakpoint::AddIntBreakpoint(intnr,
+			ah < 0 ? (uint16_t)BPINT_ALL : (uint16_t)ah,
+			al < 0 ? (uint16_t)BPINT_ALL : (uint16_t)al, once);
+		return 0;
+	case BKPNT_MEMORY:
+	case BKPNT_MEMORY_PROT:
+	case BKPNT_MEMORY_LINEAR:
+	case BKPNT_MEMORY_FREEZE: {
+		EBreakpoint t = (EBreakpoint)type;
+		CBreakpoint* bp = (t == BKPNT_MEMORY_LINEAR)
+			? CBreakpoint::AddMemBreakpoint(0, off)
+			: CBreakpoint::AddMemBreakpoint(seg, off);
+		if (!bp) return -1;
+		if (t != BKPNT_MEMORY) bp->SetType(t);
+		/* Seed the watched value with the current byte so the watch fires on the
+		 * next *change* (mirrors the FM freeze command; plain BPM left it 0). */
+		Bitu address = (t == BKPNT_MEMORY_LINEAR)
+			? (Bitu)off : (Bitu)GetAddress(bp->GetSegment(), bp->GetOffset());
+		uint8_t value = 0;
+		mem_readb_checked((PhysPt)address, &value);
+		bp->SetValue(value);
+		return 0;
+	}
+	default:
+		return -1;
+	}
+}
+
+bool MCP_BreakpointDelete(int index) {
+	if (index < 0) { CBreakpoint::DeleteAll(); return true; }
+	return CBreakpoint::DeleteByIndex((uint16_t)index);
+}
+
+int MCP_BreakpointCount(void) {
+	return (int)CBreakpoint::BPoints.size();
+}
+
+bool MCP_BreakpointGet(int index, int *type, uint16_t *seg, uint32_t *off,
+                       int *intnr, int *ah, int *al, int *memvalue,
+                       bool *once, bool *active) {
+	if (index < 0) return false;
+	int nr = 0;
+	for (auto i = CBreakpoint::BPoints.begin(); i != CBreakpoint::BPoints.end(); ++i, ++nr) {
+		if (nr != index) continue;
+		CBreakpoint* bp = *i;
+		EBreakpoint t = bp->GetType();
+		bool isInt = (t == BKPNT_INTERRUPT);
+		bool isMem = (t == BKPNT_MEMORY || t == BKPNT_MEMORY_PROT ||
+		              t == BKPNT_MEMORY_LINEAR || t == BKPNT_MEMORY_FREEZE);
+		if (type)   *type   = (int)t;
+		if (seg)    *seg    = bp->GetSegment();
+		if (off)    *off    = bp->GetOffset();
+		if (once)   *once   = bp->GetOnce();
+		if (active) *active = bp->IsActive();
+		if (intnr)  *intnr  = isInt ? bp->GetIntNr() : 0;
+		if (ah)     *ah     = isInt ? (bp->GetValue() == BPINT_ALL ? -1 : (int)bp->GetValue()) : -1;
+		if (al)     *al     = isInt ? (bp->GetOther() == BPINT_ALL ? -1 : (int)bp->GetOther()) : -1;
+		if (memvalue) *memvalue = isMem ? (int)bp->GetValue() : -1;
+		return true;
+	}
+	return false;
 }
 #endif
 

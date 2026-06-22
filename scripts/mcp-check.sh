@@ -101,6 +101,9 @@ python3 scripts/mcp_slice4_memory.py || fail "integration test #4 (read_memory/d
 log "running integration test #5: execution control (Slice 5)"
 python3 scripts/mcp_slice5_exec.py || fail "integration test #5 (execution control) failed"
 
+log "running integration test #6: breakpoints (Slice 6)"
+python3 scripts/mcp_slice6_breakpoints.py || fail "integration test #6 (breakpoints) failed"
+
 # 4. Isolation proof: the core must still build with the flag OFF.
 if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
     build

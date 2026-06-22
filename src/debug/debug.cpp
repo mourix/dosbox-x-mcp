@@ -4424,6 +4424,13 @@ uint32_t DEBUG_CheckKeys(void) {
 	Bits ret=0;
 	bool numberrun = false;
 	bool skipDraw = false;
+#if C_MCP
+	/* No ncurses in MCP builds (DEBUG_SetupConsole is skipped, so dbg.win_main
+	 * stays NULL). getch() is the one curses call here not already null-guarded;
+	 * skip it so we never touch an uninitialized console. The MCP queue, drained
+	 * via GFX_Events() inside DEBUG_Loop, drives the parked debugger instead. */
+	if (dbg.win_main == NULL) return 0;
+#endif
 #ifdef WIN32
 	int key=dbg_getch_vt();
 #else
@@ -5788,6 +5795,14 @@ void DBGBlock::set_data_view(unsigned int view) {
 }
 
 void DEBUG_SetupConsole(void) {
+#if C_MCP
+	/* MCP build: never initialize the ncurses TUI (headless or visible launch
+	 * alike). The MCP request queue is the debugger's input source, and leaving
+	 * dbg.win_main == NULL turns every draw routine into a no-op (they all
+	 * null-guard on it) and prevents initscr() from failing under no-tty CI.
+	 * See docs/MCP_BUILD_PLAN.md ("No ncurses TUI in MCP mode"). */
+	return;
+#endif
 	if (dbg.win_main == NULL) {
         LOG(LOG_MISC, LOG_DEBUG)("DEBUG_SetupConsole initializing GUI");
 

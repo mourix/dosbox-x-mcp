@@ -14,19 +14,19 @@
 #if C_MCP
 
 /* Compile-time version of the MCP module. Bumped as slices land. */
-#define MCP_VERSION "0.1.0-slice1"
+#define MCP_VERSION "0.2.0-slice2"
 
 /* Returns the MCP module version string (see MCP_VERSION). */
 const char *MCP_Version(void);
 
 /* The emulator-thread "run-class" service point. Called once per frame from
  * GFX_Events() (the single core call site, see the core-edit manifest in
- * docs/MCP_BUILD_PLAN.md). Slice 2 grows this into the run-class queue drain.
- *
- * Slice 1 uses it only for an env-gated self-test: when
- * MCP_SELFTEST_SCREENSHOT is set, it requests one screenshot after the guest
- * has had time to boot, so the integration harness can verify that the capture
- * path produces a PNG under the dummy video driver. It is a no-op otherwise. */
+ * docs/MCP_BUILD_PLAN.md). It lazily starts the TCP JSON-RPC server (when
+ * MCP_PORT is set) and drains the request queue against the current execution
+ * state, so all request handling stays single-threaded on the emulator thread.
+ * Because GFX_Events() also runs inside DEBUG_Loop, this one drain services both
+ * run-class and parked-class requests. It also runs the env-gated Slice 1
+ * screenshot self-test (MCP_SELFTEST_SCREENSHOT); a no-op otherwise. */
 void MCP_GFXFrameService(void);
 
 #endif /* C_MCP */

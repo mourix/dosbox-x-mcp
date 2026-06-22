@@ -28,6 +28,7 @@
 
 #if C_MCP
 #include "mcp_smoke_tests.cpp"
+#include "mcp_protocol_tests.cpp"
 #endif
 
 #else

@@ -89,6 +89,9 @@ run_tests "running Mcp.* smoke test (headless)" --gtest_filter=Mcp.*
 log "running integration test #1: headless screenshot (Slice 1)"
 python3 scripts/mcp_slice1_screenshot.py || fail "integration test #1 (headless screenshot) failed"
 
+log "running integration test #2: TCP JSON-RPC round trip (Slice 2)"
+python3 scripts/mcp_slice2_ping.py || fail "integration test #2 (JSON-RPC round trip) failed"
+
 # 4. Isolation proof: the core must still build with the flag OFF.
 if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
     build

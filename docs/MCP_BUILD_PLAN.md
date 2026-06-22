@@ -91,10 +91,9 @@ glance. Adding a core edit means adding a line here with its justification.
 | Edit | File | Why unavoidable |
 | --- | --- | --- |
 | `--enable-mcp` flag → `C_DEBUG` | `configure.ac`, `src/Makefile.am` | build wiring (Slice 0) |
-| Per-frame service call `MCP_GFXFrameService()` | `GFX_Events()`, `sdlmain.cpp:5893` | single `run`-class core call site; introduced in Slice 1 (env-gated screenshot self-test), extended in Slice 2 to drain the run-class queue. Runs in both normal and debug loops. |
-| Dispatcher drain (parked-class) | `DEBUG_Loop`, `debug.cpp:4870` | service `parked`-class requests in the existing poll loop (Slice 2) |
-| Skip ncurses init when headless | `DEBUG_SetupConsole`, `debug.cpp:5790` | leave `dbg.win_main==NULL` so the TUI is a no-op and `initscr` can't fail under no-tty CI (Slice 2) |
-| Guard the parked `getch()` | `DEBUG_CheckKeys`, `debug.cpp:4430` | the one curses call not already null-guarded; skip input scraping when headless (Slice 2) |
+| Per-frame service call `MCP_GFXFrameService()` | `GFX_Events()`, `sdlmain.cpp:5895` | the **single** core call site for the dispatcher. Introduced in Slice 1 (env-gated screenshot self-test), extended in Slice 2 to start the TCP server and drain the request queue against the current execution state. `GFX_Events()` runs in **both** the normal loop and `DEBUG_Loop` (`debug.cpp:4884`), so this one drain services **both** `run`-class (running) and `parked`-class (parked) requests — no separate `DEBUG_Loop` edit is needed (it was planned but proved redundant, keeping the blast radius smaller). The current state, not the call site, decides mode-mismatch fast-reject. |
+| Skip ncurses init in MCP builds | `DEBUG_SetupConsole`, `debug.cpp:5790` | early `return` under `#if C_MCP` leaves `dbg.win_main==NULL`, so the TUI is a no-op (every draw routine null-guards) and `initscr` can't fail under no-tty CI (Slice 2). Keyed on `--enable-mcp`, not launch mode. |
+| Guard the parked `getch()` | `DEBUG_CheckKeys`, `debug.cpp:4430` | `if (dbg.win_main==NULL) return 0;` under `#if C_MCP` — the one curses call not already null-guarded; the MCP queue is the input source instead (Slice 2). |
 
 ## Test strategy (two layers)
 
@@ -156,6 +155,17 @@ dispatcher drains; skip `DEBUG_SetupConsole()` so ncurses isn't initialized head
 queue timeout fires. Integration — connect, `ping`, assert reply; assert the server refuses a non-localhost
 bind and a second client.
 **DoD:** round trip works headless; bounds + localhost bind + timeout asserted; `mcp-check.sh` green.
+
+**Outcome (resolved):** ✅ Shipped. New `src/mcp/` files: `mcp_json.{h,cpp}` (minimal stdlib JSON),
+`mcp_protocol.{h,cpp}` (classification + bounds + pure `dispatch`, with `ping`/`server_info`),
+`mcp_server.{h,cpp}` (poll-based single-client TCP server on `127.0.0.1`, request queue, 5 s timeout,
+emulator-thread `drain`). Server is **opt-in via the `MCP_PORT` env var** (normal interactive runs open
+no socket); the Slice 12 launcher will set it. Core edits landed exactly as in the manifest above (the
+planned separate `DEBUG_Loop` drain proved redundant). Unit tests: `tests/mcp_protocol_tests.cpp`
+(`Mcp.*`). Integration: `scripts/mcp_slice2_ping.py` (ping, server_info localhost bind, mode-mismatch
+fast-reject, second-client refusal), wired into `scripts/mcp-check.sh`. The localhost-bind invariant is
+asserted both as the `MCP_BIND_ADDRESS`/`server_info` constant (unit) and by the over-the-wire test. The
+queue timeout is the `kRequestTimeout` (5 s) path in `submit_and_wait`.
 
 ## Slice 3 — `read_registers` (first emulator-state tool)
 **Goal:** read CPU/segment/flags state at a stop.

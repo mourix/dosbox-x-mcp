@@ -535,6 +535,92 @@ ShotStatus screenshot_service(ScreenshotResult &out);
 /* Pure: format a completed capture as compact JSON. */
 Json format_screenshot(const ScreenshotResult &out);
 
+/* ---- memory scanner (Slice 11) ------------------------------------------
+ *
+ * scan_start / scan_filter / scan_results — a "cheat-engine" progressive search
+ * for variables. Wraps the debugger's MEMFIND/MEMS (the single session-global
+ * MEMFINDInstance): start snapshots a seg:off range; filter narrows the
+ * candidate set with one of == != > < >= <= (or, with use_prev, against each
+ * cell's start snapshot); results are bounded/paginated. Same reader/formatter
+ * split as the other parked slices: the param parsing and JSON formatting are
+ * pure (here / mcp_protocol.cpp, unit-tested with no boot), while the scan touches
+ * emulator memory and lives in the bridge mcp_scan.cpp, which calls the single
+ * Slice 11 core edit (the MCP_Scan* functions in debug.cpp). All three tools are
+ * parked-class. The scanner is session-global state: a new scan_start replaces
+ * any in-progress scan. */
+
+/* Cap the scanned range so the snapshot/scan work per call stays bounded. */
+static const size_t MCP_SCAN_RANGE_MAX = 1024 * 1024; /* 1 MiB range per scan */
+
+/* Comparison operator. The integer values match debug.cpp's MEMFinder::opType so
+ * the value crossing the bridge is unambiguous. */
+enum ScanOp { SCAN_EQ = 0, SCAN_GT, SCAN_LT, SCAN_NE, SCAN_GE, SCAN_LE };
+
+/* A parsed scan_start request. `width` ∈ {1,2,4} (default 1) is the element size;
+ * `range` is in bytes, clamped to [1, MCP_SCAN_RANGE_MAX]. */
+struct ScanStartRequest {
+    uint16_t seg;
+    uint32_t off;
+    uint32_t range;   /* bytes */
+    int      width;   /* 1, 2 or 4 */
+};
+
+/* A parsed scan_filter request. When `use_prev` is true the comparison is against
+ * each cell's start-snapshot value and `value` is ignored. */
+struct ScanFilterRequest {
+    ScanOp   op;
+    bool     use_prev;
+    uint32_t value;
+};
+
+/* Read-back scanner state. `active` false means there is no scan; the other
+ * fields are then meaningless. `matches` is the current candidate count. */
+struct ScanState {
+    bool     active;
+    uint16_t seg;
+    uint32_t off;
+    uint32_t base_linear;
+    int      width;
+    uint32_t range;       /* bytes */
+    uint32_t matches;
+    uint32_t iterations;
+};
+
+/* One scan match: an address still in the candidate set + its current value. */
+struct ScanMatch {
+    uint16_t seg;
+    uint32_t off;
+    uint32_t lin;
+    uint32_t value;
+};
+
+const char *scan_op_name(ScanOp op);                  /* "=="/">"/"<"/...      */
+bool        parse_scan_op(const std::string &s, ScanOp &out);
+
+/* Pure: parse params. scan_start needs seg+off+range (width default 1); range is
+ * clamped to MCP_SCAN_RANGE_MAX. scan_filter needs `op`; `value` is required
+ * unless `use_prev` is true. Return false + err on a missing/invalid field. */
+bool parse_scan_start_request(const Json &params, ScanStartRequest &req, std::string &err);
+bool parse_scan_filter_request(const Json &params, ScanFilterRequest &req, std::string &err);
+
+/* Pure: format the scanner state (scan_start / scan_filter reply) and a bounded
+ * page of matches (scan_results), capped at `max` with start/count/total/truncated. */
+Json format_scan_state(const ScanState &st);
+Json format_scan_results(const ScanState &st, const std::vector<ScanMatch> &matches,
+                         uint32_t start, uint32_t total, size_t max);
+
+/* Bridges (mcp_scan.cpp): run on the emulator thread while parked.
+ * scan_start returns 0 on success or a negative error code (-2 empty range,
+ * -3 selector did not resolve, -4 range exceeds configured memory, -5 bad width)
+ * and fills `st`. scan_filter returns the new match count or <0 (-1 no active
+ * scan, -2 value wider than the element size) and refreshes `st`. scan_state
+ * reads the current state. scan_results fills up to `max` matches starting at
+ * match-index `start` and returns the total match count. */
+int      scan_start(const ScanStartRequest &req, ScanState &st);
+long     scan_filter(const ScanFilterRequest &req, ScanState &st);
+void     scan_state(ScanState &st);
+uint32_t scan_results(uint32_t start, size_t max, std::vector<ScanMatch> &out);
+
 /* Internal sentinel reply meaning "not ready — re-queue and retry next frame".
  * Returned by dispatch for an in-progress take_screenshot; the server re-queues
  * the request instead of replying. Never sent to a client (it is not valid

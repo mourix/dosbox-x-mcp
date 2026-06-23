@@ -142,12 +142,13 @@ TEST(Mcp, DispatchModeMismatchCarriesCurrentState)
     EXPECT_EQ(err->find("code")->asInt(), MCP_ERR_MODE_MISMATCH);
     EXPECT_EQ(err->find("data")->find("state")->asString(), "running");
 
-    // A parked-class request whose handler is not yet implemented (scan_start
-    // arrives in Slice 11) succeeds the mode check while parked, so it reports
-    // not-implemented rather than a mismatch. (Must be a method whose handler is
-    // still a stub: dispatching an *implemented* state-touching tool here would
-    // invoke the real emulator-state bridge — not what this pure test wants.)
-    std::string line2 = dispatch("scan_start", Json::object(), Json::integer(5), STATE_PARKED);
+    // A parked-class request whose handler is not yet implemented
+    // (debugger_command arrives in Slice 13) succeeds the mode check while
+    // parked, so it reports not-implemented rather than a mismatch. (Must be a
+    // method whose handler is still a stub: dispatching an *implemented*
+    // state-touching tool here would invoke the real emulator-state bridge — not
+    // what this pure test wants.)
+    std::string line2 = dispatch("debugger_command", Json::object(), Json::integer(5), STATE_PARKED);
     Json r2;
     ASSERT_TRUE(Json::parse(line2, r2));
     ASSERT_NE(r2.find("error"), nullptr);
@@ -1155,6 +1156,151 @@ TEST(Mcp, DeferSentinelIsNotValidJson)
 TEST(Mcp, ScreenshotClassification)
 {
     EXPECT_EQ(classify("take_screenshot"), CLS_RUN);
+}
+
+// -- memory scanner (Slice 11) ---------------------------------------------
+
+TEST(Mcp, ScanOpNamesAndParsing)
+{
+    EXPECT_STREQ(scan_op_name(SCAN_EQ), "==");
+    EXPECT_STREQ(scan_op_name(SCAN_GT), ">");
+    EXPECT_STREQ(scan_op_name(SCAN_LE), "<=");
+
+    ScanOp op;
+    ASSERT_TRUE(parse_scan_op("==", op)); EXPECT_EQ(op, SCAN_EQ);
+    ASSERT_TRUE(parse_scan_op("=", op));  EXPECT_EQ(op, SCAN_EQ);
+    ASSERT_TRUE(parse_scan_op(">", op));  EXPECT_EQ(op, SCAN_GT);
+    ASSERT_TRUE(parse_scan_op("!=", op)); EXPECT_EQ(op, SCAN_NE);
+    ASSERT_TRUE(parse_scan_op("!", op));  EXPECT_EQ(op, SCAN_NE);
+    ASSERT_TRUE(parse_scan_op(">=", op)); EXPECT_EQ(op, SCAN_GE);
+    ASSERT_TRUE(parse_scan_op("<=", op)); EXPECT_EQ(op, SCAN_LE);
+    EXPECT_FALSE(parse_scan_op("~", op));
+}
+
+TEST(Mcp, ParseScanStartDefaultsAndClamp)
+{
+    ScanStartRequest req;
+    std::string err;
+    ASSERT_TRUE(parse_scan_start_request(
+        parse_params("{\"seg\":\"0x40\",\"off\":0,\"range\":256}"), req, err)) << err;
+    EXPECT_EQ(req.seg, 0x40u);
+    EXPECT_EQ(req.off, 0u);
+    EXPECT_EQ(req.range, 256u);
+    EXPECT_EQ(req.width, 1); // default
+
+    // width respected; range over the cap is clamped, not rejected.
+    char big[64];
+    std::snprintf(big, sizeof(big), "{\"seg\":0,\"off\":0,\"range\":%u,\"width\":4}",
+                  (unsigned)(MCP_SCAN_RANGE_MAX + 1));
+    ASSERT_TRUE(parse_scan_start_request(parse_params(big), req, err)) << err;
+    EXPECT_EQ(req.width, 4);
+    EXPECT_EQ((size_t)req.range, MCP_SCAN_RANGE_MAX);
+}
+
+TEST(Mcp, ParseScanStartRejectsBadInput)
+{
+    ScanStartRequest req;
+    std::string err;
+    EXPECT_FALSE(parse_scan_start_request(parse_params("{\"off\":0,\"range\":1}"), req, err));
+    EXPECT_FALSE(parse_scan_start_request(parse_params("{\"seg\":0,\"range\":1}"), req, err));
+    EXPECT_FALSE(parse_scan_start_request(parse_params("{\"seg\":0,\"off\":0}"), req, err));
+    EXPECT_FALSE(parse_scan_start_request(parse_params("{\"seg\":0,\"off\":0,\"range\":0}"), req, err));
+    EXPECT_FALSE(parse_scan_start_request(parse_params("{\"seg\":0,\"off\":0,\"range\":1,\"width\":3}"), req, err));
+}
+
+TEST(Mcp, ParseScanFilterValueAndPrev)
+{
+    ScanFilterRequest req;
+    std::string err;
+    ASSERT_TRUE(parse_scan_filter_request(
+        parse_params("{\"op\":\"==\",\"value\":\"0x2a\"}"), req, err)) << err;
+    EXPECT_EQ(req.op, SCAN_EQ);
+    EXPECT_FALSE(req.use_prev);
+    EXPECT_EQ(req.value, 0x2au);
+
+    // use_prev makes value optional and ignored.
+    ASSERT_TRUE(parse_scan_filter_request(
+        parse_params("{\"op\":\">\",\"use_prev\":true}"), req, err)) << err;
+    EXPECT_EQ(req.op, SCAN_GT);
+    EXPECT_TRUE(req.use_prev);
+
+    // op required; value required unless use_prev; unknown op rejected.
+    EXPECT_FALSE(parse_scan_filter_request(parse_params("{\"value\":1}"), req, err));
+    EXPECT_FALSE(parse_scan_filter_request(parse_params("{\"op\":\"==\"}"), req, err));
+    EXPECT_FALSE(parse_scan_filter_request(parse_params("{\"op\":\"~\",\"value\":1}"), req, err));
+}
+
+TEST(Mcp, FormatScanStateActiveAndInactive)
+{
+    ScanState st;
+    st.active = true; st.seg = 0x40; st.off = 0x10; st.base_linear = 0x410;
+    st.width = 2; st.range = 0x100; st.matches = 7; st.iterations = 2;
+    Json r = format_scan_state(st);
+    EXPECT_TRUE(r.find("active")->asBool());
+    EXPECT_STREQ(r.find("seg")->asString().c_str(), "0x0040");
+    EXPECT_STREQ(r.find("base_linear")->asString().c_str(), "0x00000410");
+    EXPECT_EQ(r.find("width")->asInt(), 2);
+    EXPECT_EQ(r.find("range")->asInt(), 0x100);
+    EXPECT_EQ(r.find("matches")->asInt(), 7);
+    EXPECT_EQ(r.find("iterations")->asInt(), 2);
+
+    // Inactive: only the active flag, no stale fields.
+    ScanState none; none.active = false;
+    Json r2 = format_scan_state(none);
+    EXPECT_FALSE(r2.find("active")->asBool());
+    EXPECT_EQ(r2.find("seg"), nullptr);
+    EXPECT_EQ(r2.find("matches"), nullptr);
+}
+
+TEST(Mcp, FormatScanResultsBoundedAndValueWidth)
+{
+    ScanState st;
+    st.active = true; st.width = 2; st.seg = 0x100; st.off = 0;
+    std::vector<ScanMatch> matches;
+    for (int i = 0; i < 5; i++) {
+        ScanMatch m;
+        m.seg = 0x100; m.off = (uint32_t)(i * 2); m.lin = 0x1000 + i * 2;
+        m.value = (uint32_t)(0x1234 + i);
+        matches.push_back(m);
+    }
+    // total 5, page of 3 from start 0 -> truncated.
+    Json r = format_scan_results(st, matches, 0, 5, 3);
+    EXPECT_EQ(r.find("count")->asInt(), 3);
+    EXPECT_EQ(r.find("total")->asInt(), 5);
+    EXPECT_EQ(r.find("start")->asInt(), 0);
+    EXPECT_TRUE(r.find("truncated")->asBool());
+    ASSERT_TRUE(r.find("matches")->isArray());
+    // value rendered at width*2 hex digits (size 2 -> 4 digits).
+    EXPECT_STREQ(r.find("matches")->at(0).find("value")->asString().c_str(), "0x1234");
+
+    // Last page: start+count == total -> not truncated.
+    std::vector<ScanMatch> tail(matches.begin() + 3, matches.end());
+    Json r2 = format_scan_results(st, tail, 3, 5, 3);
+    EXPECT_EQ(r2.find("count")->asInt(), 2);
+    EXPECT_FALSE(r2.find("truncated")->asBool());
+}
+
+TEST(Mcp, FormatScanResultsFullPageWithinCeiling)
+{
+    ScanState st; st.active = true; st.width = 4;
+    std::vector<ScanMatch> matches;
+    for (size_t i = 0; i < MCP_LIST_MAX; i++) {
+        ScanMatch m;
+        m.seg = 0x1000; m.off = (uint32_t)(i * 4); m.lin = (uint32_t)(0x10000 + i * 4);
+        m.value = 0xdeadbeef;
+        matches.push_back(m);
+    }
+    std::string body = format_scan_results(st, matches, 0, (uint32_t)MCP_LIST_MAX, MCP_LIST_MAX).serialize();
+    EXPECT_LE(body.size(), MCP_MAX_PAYLOAD);
+}
+
+TEST(Mcp, ScanClassification)
+{
+    EXPECT_EQ(classify("scan_start"), CLS_PARKED);
+    EXPECT_EQ(classify("scan_filter"), CLS_PARKED);
+    EXPECT_EQ(classify("scan_results"), CLS_PARKED);
+    EXPECT_FALSE(mode_matches(CLS_PARKED, STATE_RUNNING));
+    EXPECT_TRUE(mode_matches(CLS_PARKED, STATE_PARKED));
 }
 
 } // namespace

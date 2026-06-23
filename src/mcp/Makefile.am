@@ -9,6 +9,7 @@ libmcp_a_SOURCES = \
 	mcp_memory.cpp \
 	mcp_execution.cpp \
 	mcp_breakpoints.cpp \
+	mcp_scan.cpp \
 	mcp_input.cpp \
 	mcp_screen.cpp \
 	mcp_screenshot.cpp \

@@ -145,6 +145,9 @@ python3 scripts/mcp_slice9_screen.py || fail "integration test #9 (screen reads)
 log "running integration test #10: take_screenshot (Slice 10)"
 python3 scripts/mcp_slice10_screenshot.py || fail "integration test #10 (take_screenshot) failed"
 
+log "running integration test #11: memory scanner (Slice 11)"
+python3 scripts/mcp_slice11_scan.py || fail "integration test #11 (memory scanner) failed"
+
 # 4. Isolation proof: the core must still build with the flag OFF.
 if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
     build

@@ -63,6 +63,7 @@ The bounding helper enforces these; tests assert against them, not ad-hoc per-sl
 - **disassemble:** default **16** instructions, max **128** per call.
 - **read_screen:** full text grid (≤ 80×50 = 4000 cells) is within budget; bounded by the 64 KiB ceiling.
 - **breakpoint / scan list:** max **256** entries per page.
+- **scan_start range:** scanned range clamped to **1 MiB** per scan (bounds the snapshot + per-filter work).
 - **debugger_command passthrough:** captured output truncated to **16 KiB**.
 
 ## No ncurses TUI in MCP mode (either launch mode)
@@ -97,6 +98,7 @@ glance. Adding a core edit means adding a line here with its justification.
 | Skip the no-tty guard in `DEBUG_Enable_Handler` | `debug.cpp:5015` | The Linux/macOS branch returns early (debugger "not available") when stdin/stdout/stderr aren't a terminal, so `-break-start` would never park under the headless harness (pipes, no tty). Compiled out under `#if ... && !C_MCP`: the MCP build has no ncurses TUI and its input source is the request queue, so the debugger must engage headless (Slice 3). |
 | Execution-control entry point `MCP_DebugExec()` | `debug.cpp` (after `DEBUG_Run`) | one `#if C_MCP` function the MCP module calls to drive step/step_over/continue/break (Slice 5). It must live in `debug.cpp` because it manipulates debugger statics that are not exported — `debugging`, `exitLoop`, `mustCompleteInstruction`, and the static `StepOver()` — and it reuses the exact primitives the F11/F10/F5 key handlers and `-break-start` use (`DEBUG_Run`, `DEBUG_EnableDebugger`). Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
 | Breakpoint bridge `MCP_Breakpoint{Add,Delete,Count,Get}()` + two `CBreakpoint` friend decls | `debug.cpp` (after `MCP_DebugExec`; friends near `BPoints`) | `#if C_MCP` free functions the MCP module calls for breakpoint_list/add/delete (Slice 6). They must live in `debug.cpp` because the breakpoint store (`CBreakpoint` and its private static `BPoints`) is not exported. Add/Delete reuse the public `CBreakpoint::Add*`/`DeleteByIndex`/`DeleteAll` API the BP/BPINT/BPM/BPDEL commands use; the two list-readers need `BPoints`, so they are `friend`s of `CBreakpoint` (the same pattern as the existing `DEBUG_HeavyIsBreakpoint` friend). Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
+| Memory-scanner bridge `MCP_Scan{Start,Filter,State,Results,Cancel}()` | `debug.cpp` (after `MCP_BreakpointGet`) | `#if C_MCP` free functions the MCP module calls for scan_start/scan_filter/scan_results (Slice 11). They must live in `debug.cpp` because the scanner store — the single global `MEMFINDInstance` and its file-private `MEMFinder` struct — is not exported. They mirror the existing MEMFIND-start / MEMS-filter / MEMFIND-L-list algorithms exactly, exposing structured out-params instead of `DEBUG_ShowMsg` text. Two programmatic-client conveniences vs the interactive commands: Start replaces an in-progress scan (MEMFIND rejects it), and Filter does not auto-delete the instance at 0 matches (MEMS does) so Results stays callable. The existing MEMFIND/MEMS `ParseCommand` handlers are **unchanged**. Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
 
 ## Test strategy (two layers)
 
@@ -419,6 +421,29 @@ naming), and the parked mode-mismatch fast-reject; wired into `scripts/mcp-check
 `= ! > < >= <=`; results are **bounded/paginated**. Treat the instance as session-global state.
 **Tests:** integration — start a scan, change a known value, filter `=`, assert the address narrows to it.
 **DoD:** `mcp-check.sh` green.
+
+**Outcome (resolved):** ✅ Shipped. Same reader/formatter split as the other parked slices: the param
+parsing + JSON formatting are pure in `mcp_protocol.cpp` (unit-tested with no boot); the scan touches
+emulator memory and lives in the bridge `src/mcp/mcp_scan.cpp`, which calls the **single core edit** —
+`MCP_Scan{Start,Filter,State,Results,Cancel}()` in `debug.cpp` (in the manifest above). Those functions
+wrap the debugger's existing `MEMFIND`/`MEMS` logic over the session-global `MEMFINDInstance`, mirroring the
+start-snapshot / filter / list algorithms exactly but returning structured out-params; the interactive
+`MEMFIND`/`MEMS` `ParseCommand` handlers are untouched. `scan_start` snapshots a `seg:off` range (range
+clamped to `MCP_SCAN_RANGE_MAX` = 1 MiB, `width` ∈ {1,2,4}); `scan_filter` narrows the candidate set with
+`== != > < >= <=` (op integers match `MEMFinder::opType`), or against each cell's start snapshot via
+`use_prev`; `scan_results` returns a `MCP_LIST_MAX` (256)-bounded page with `start`/`count`/`total`/
+`truncated`. Two deliberate client conveniences vs the interactive commands: a fresh `scan_start` **replaces**
+an in-progress scan, and `scan_filter` does **not** auto-delete the instance at 0 matches (so `scan_results`
+stays callable). All three tools are parked-class. Unit tests: `tests/mcp_protocol_tests.cpp`
+(`Mcp.ScanOpNamesAndParsing`, `Mcp.ParseScanStart*`, `Mcp.ParseScanFilter*`, `Mcp.FormatScanState*`,
+`Mcp.FormatScanResults*`, `Mcp.ScanClassification`) cover op parsing, param defaults/clamp/rejection, the
+JSON shape, value-width rendering, pagination, the payload bound, and classification. Integration:
+`scripts/mcp_slice11_scan.py` boots headless parked (`-break-start`), and — holding guest memory still while
+parked — uses the Slice 7 `write_memory` tool to control a scratch region: it proves the build-plan
+assertion (zero-fill → `scan_start` → change one byte → `scan_filter ==` narrows to exactly that address with
+the right value), plus a width-2 narrowing, pagination past the 256-entry page, the no-active-scan rejection,
+the bad-param fast-rejects, and that a fresh `scan_start` replaces an in-progress scan; wired into
+`scripts/mcp-check.sh` (integration test #11).
 
 ## Slice 12 — Lifecycle: launcher + `reset` / `quit`
 **Goal:** repeatable game launch + in-session lifecycle.

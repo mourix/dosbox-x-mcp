@@ -883,6 +883,110 @@ Json format_screenshot(const ScreenshotResult &out) {
     return r;
 }
 
+/* ---- memory scanner (Slice 11) ------------------------------------------- */
+
+const char *scan_op_name(ScanOp op) {
+    switch (op) {
+        case SCAN_GT: return ">";
+        case SCAN_LT: return "<";
+        case SCAN_NE: return "!=";
+        case SCAN_GE: return ">=";
+        case SCAN_LE: return "<=";
+        default:      return "==";
+    }
+}
+
+bool parse_scan_op(const std::string &s, ScanOp &out) {
+    if      (s == "==" || s == "=" || s == "eq") out = SCAN_EQ;
+    else if (s == ">"  || s == "gt")             out = SCAN_GT;
+    else if (s == "<"  || s == "lt")             out = SCAN_LT;
+    else if (s == "!=" || s == "!" || s == "ne") out = SCAN_NE;
+    else if (s == ">=" || s == "ge")             out = SCAN_GE;
+    else if (s == "<=" || s == "le")             out = SCAN_LE;
+    else return false;
+    return true;
+}
+
+bool parse_scan_start_request(const Json &params, ScanStartRequest &req, std::string &err) {
+    uint32_t seg;
+    if (!json_to_u32(params.find("seg"), seg)) { err = "missing/invalid seg"; return false; }
+    req.seg = (uint16_t)seg;
+    if (!json_to_u32(params.find("off"), req.off)) { err = "missing/invalid off"; return false; }
+    if (!json_to_u32(params.find("range"), req.range)) { err = "missing/invalid range"; return false; }
+    if (req.range == 0) { err = "range must be non-zero"; return false; }
+    if (req.range > MCP_SCAN_RANGE_MAX) req.range = (uint32_t)MCP_SCAN_RANGE_MAX;
+
+    req.width = 1;
+    if (params.has("width")) {
+        uint32_t w;
+        if (!json_to_u32(params.find("width"), w) || (w != 1 && w != 2 && w != 4)) {
+            err = "width must be 1, 2 or 4"; return false;
+        }
+        req.width = (int)w;
+    }
+    return true;
+}
+
+bool parse_scan_filter_request(const Json &params, ScanFilterRequest &req, std::string &err) {
+    const Json *op = params.find("op");
+    if (op == nullptr || !op->isString()) { err = "missing/invalid op"; return false; }
+    if (!parse_scan_op(op->asString(), req.op)) {
+        err = "unknown op (want == != > < >= <=): " + op->asString(); return false;
+    }
+    req.use_prev = false;
+    const Json *up = params.find("use_prev");
+    if (up != nullptr) {
+        if (!up->isBool()) { err = "use_prev must be a boolean"; return false; }
+        req.use_prev = up->asBool();
+    }
+    req.value = 0;
+    if (!req.use_prev) {
+        if (!json_to_u32(params.find("value"), req.value)) {
+            err = "missing/invalid value (or set use_prev:true)"; return false;
+        }
+    }
+    return true;
+}
+
+Json format_scan_state(const ScanState &st) {
+    Json r = Json::object();
+    r.set("active", Json::boolean(st.active));
+    if (st.active) {
+        r.set("seg", Json::str(hex(st.seg, 4)));
+        r.set("off", Json::str(hex(st.off, 8)));
+        r.set("base_linear", Json::str(hex(st.base_linear, 8)));
+        r.set("width", Json::integer((long long)st.width));
+        r.set("range", Json::integer((long long)st.range));
+        r.set("matches", Json::integer((long long)st.matches));
+        r.set("iterations", Json::integer((long long)st.iterations));
+    }
+    return r;
+}
+
+Json format_scan_results(const ScanState &st, const std::vector<ScanMatch> &matches,
+                         uint32_t start, uint32_t total, size_t max) {
+    Json r = Json::object();
+    r.set("active", Json::boolean(st.active));
+    r.set("width", Json::integer((long long)st.width));
+    Json arr = Json::array();
+    size_t shown = matches.size() > max ? max : matches.size();
+    for (size_t i = 0; i < shown; i++) {
+        const ScanMatch &m = matches[i];
+        Json o = Json::object();
+        o.set("seg", Json::str(hex(m.seg, 4)));
+        o.set("off", Json::str(hex(m.off, 8)));
+        o.set("lin", Json::str(hex(m.lin, 8)));
+        o.set("value", Json::str(hex(m.value, st.width * 2)));
+        arr.push(o);
+    }
+    r.set("matches", arr);
+    r.set("start", Json::integer((long long)start));
+    r.set("count", Json::integer((long long)shown));
+    r.set("total", Json::integer((long long)total));
+    r.set("truncated", Json::boolean((uint64_t)start + shown < total));
+    return r;
+}
+
 const std::string &defer_sentinel() {
     /* Leading control byte → never a valid JSON response line, so the server can
      * distinguish "re-queue me" from a real reply with a simple equality check. */
@@ -1062,6 +1166,47 @@ std::string dispatch(const std::string &method, const Json &params,
             return make_error(id, MCP_ERR_INTERNAL,
                               out.error.empty() ? "screenshot failed" : out.error);
         return enforce_max_payload(id, make_result(id, format_screenshot(out)));
+    }
+
+    if (method == "scan_start") {
+        /* Parked-class: mode_matches guaranteed STATE_PARKED above. */
+        ScanStartRequest req;
+        std::string perr;
+        if (!parse_scan_start_request(params, req, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        ScanState st;
+        int rc = scan_start(req, st);
+        if (rc < 0) {
+            const char *why = rc == -3 ? "segmented selector did not resolve" :
+                              rc == -4 ? "range exceeds configured memory" :
+                              rc == -5 ? "width must be 1, 2 or 4" :
+                                         "invalid scan range";
+            return make_error(id, MCP_ERR_INVALID_PARAMS, why);
+        }
+        return enforce_max_payload(id, make_result(id, format_scan_state(st)));
+    }
+    if (method == "scan_filter") {
+        ScanFilterRequest req;
+        std::string perr;
+        if (!parse_scan_filter_request(params, req, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        ScanState st;
+        long rc = scan_filter(req, st);
+        if (rc == -1)
+            return make_error(id, MCP_ERR_INVALID_REQ, "no active scan (call scan_start first)");
+        if (rc < 0)
+            return make_error(id, MCP_ERR_INVALID_PARAMS, "value wider than the element size");
+        return enforce_max_payload(id, make_result(id, format_scan_state(st)));
+    }
+    if (method == "scan_results") {
+        uint32_t start = 0;
+        if (params.has("start") && !json_to_u32(params.find("start"), start))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, "invalid start");
+        ScanState st;
+        scan_state(st);
+        std::vector<ScanMatch> matches;
+        uint32_t total = scan_results(start, MCP_LIST_MAX, matches);
+        return enforce_max_payload(id, make_result(id, format_scan_results(st, matches, start, total, MCP_LIST_MAX)));
     }
 
     /* Known method whose handler arrives in a later slice. */

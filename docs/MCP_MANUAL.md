@@ -10,8 +10,9 @@ themselves (the single source of truth) — this manual does not duplicate schem
 > `read_memory` + `disassemble` (Slice 4), execution control `step` / `step_over` /
 > `continue` / `break` (Slice 5), breakpoints `breakpoint_list` / `breakpoint_add` /
 > `breakpoint_delete` (Slice 6), writes `write_register` / `write_memory` (Slice 7),
-> input injection `send_keys` / `type_text` / `mouse` (Slice 8), and screen reads
-> `read_screen` / `screen_hash` (Slice 9).
+> input injection `send_keys` / `type_text` / `mouse` (Slice 8), screen reads
+> `read_screen` / `screen_hash` (Slice 9), `take_screenshot` (Slice 10), and the memory
+> scanner `scan_start` / `scan_filter` / `scan_results` (Slice 11).
 > Remaining tools land in later slices. Keep workflows here in sync with the implemented
 > tools; update on every feature.
 
@@ -250,6 +251,34 @@ pair directly with input injection (no `break` needed).
   returned `path` is absolute and the file already exists when the reply arrives. Each call
   writes a new, distinctly-named PNG into the capture directory. Use `width`/`height` (read
   from the PNG itself) for the true output dimensions.
+
+### Scanning for variables ("cheat-engine")
+Three **parked**-class tools find an unknown variable by progressively narrowing a memory
+range to the cells that still match a series of comparisons — the classic way to locate a
+score, health, or timer without knowing its address. They wrap the debugger's `MEMFIND`/`MEMS`
+search and share **one session-global scan** (a fresh `scan_start` discards any scan in
+progress). `break` or launch `-break-start` first.
+
+- **`scan_start`** snapshots a range to search: `{seg, off, range, width?}`. `range` is in
+  bytes (clamped to 1 MiB); `width` is the element size `1`|`2`|`4` (default `1`). The reply is
+  the scan state `{active: true, seg, off, base_linear, width, range, matches, iterations: 0}`
+  where `matches` starts at every slot in the range (`range/width`).
+- **`scan_filter`** narrows the candidate set: `{op, value}` keeps only cells where
+  `cell <op> value`, with `op` one of `==` `!=` `>` `<` `>=` `<=` (aliases `=`/`!` accepted).
+  Pass `{op, use_prev: true}` (no `value`) to compare each cell against **its own start
+  snapshot** instead — e.g. `op: ">"` keeps cells that have *increased* since `scan_start`.
+  The reply is the updated scan state (note the new `matches` and incremented `iterations`).
+  Unlike the interactive `MEMS`, reaching 0 matches does **not** end the scan, so you can still
+  read the (empty) result and then re-`scan_start`.
+- **`scan_results`** returns the surviving addresses, paginated: `{start?}` (default 0) →
+  `{active, width, matches: [{seg, off, lin, value}…], start, count, total, truncated}`, capped
+  at **256** entries per page (request the next page with `start: 256`, etc.). `value` is the
+  cell's *current* value, rendered at the element width.
+
+Typical loop: `scan_start` over a likely range → let the value change in the guest (play a
+bit, or write it) → `scan_filter` for the new value (or `use_prev` for changed/unchanged) →
+repeat until `scan_results` shows a handful of addresses → confirm with `read_memory`, or plant
+a `mem`/`mem_freeze` breakpoint to watch writes.
 
 ### Typical reverse-engineering loop
 _TODO: load target → break at entry → step → inspect → map behavior → record findings._

@@ -4494,6 +4494,150 @@ bool MCP_BreakpointGet(int index, int *type, uint16_t *seg, uint32_t *off,
 	}
 	return false;
 }
+
+/* MCP memory-scanner bridge (Slice 11): scan_start / scan_filter / scan_results.
+ * A "cheat-engine" progressive search that wraps the debugger's MEMFIND/MEMS
+ * command logic. Like the other MCP_* bridges these live in debug.cpp because the
+ * scanner state — the single global MEMFINDInstance and its file-private MEMFinder
+ * struct — is not exported. They mirror the MEMFIND-start / MEMS-filter /
+ * MEMFIND-L-list algorithms exactly, but expose structured data instead of
+ * DEBUG_ShowMsg text. Compiled away without --enable-mcp.
+ *
+ * Two deliberate deviations from the interactive MEMFIND/MEMS, both to suit a
+ * programmatic client:
+ *  - MCP_ScanStart *replaces* any in-progress scan (MEMFIND rejects "already
+ *    active"), so a fresh search is one call;
+ *  - MCP_ScanFilter does NOT auto-delete the instance when matches reaches 0
+ *    (MEMS does), so scan_results stays callable to report the empty set; the
+ *    client ends a scan with the next scan_start, or reset/quit.
+ * usePrev compares each cell against its *start* snapshot (the MEMS semantics —
+ * tableValue is the original snapshot, never refreshed). opType encoding matches
+ * MEMFinder::opType: 0 ==, 1 >, 2 <, 3 !=, 4 >=, 5 <=. See the core-edit manifest
+ * in docs/MCP_BUILD_PLAN.md (Slice 11). */
+void MCP_ScanCancel(void) {
+	if (MEMFINDInstance == NULL) return;
+	MEMFINDInstance->tableTruth.clear();
+	MEMFINDInstance->tableValue.clear();
+	MEMFINDInstance->tableTruth.shrink_to_fit();
+	MEMFINDInstance->tableValue.shrink_to_fit();
+	delete MEMFINDInstance;
+	MEMFINDInstance = NULL;
+}
+
+int MCP_ScanStart(uint16_t seg, uint32_t ofs, uint32_t range, uint8_t size) {
+	if (range == 0) return -2;
+	if (size != 1 && size != 2 && size != 4) return -5;
+	uint64_t base = GetAddress(seg, ofs);
+	if (base == mem_no_address) return -3;
+	uint64_t memBytes = (uint64_t)MEM_TotalPages() << 12;
+	if ((base + (uint64_t)range) > memBytes) return -4;
+	MCP_ScanCancel(); /* replace any in-progress scan */
+	MEMFINDInstance = new MEMFinder;
+	MEMFINDInstance->baseLinear = (uint32_t)base;
+	MEMFINDInstance->seg = seg;
+	MEMFINDInstance->ofs = ofs;
+	MEMFINDInstance->size = size;
+	MEMFINDInstance->range = range;
+	MEMFINDInstance->matches = range / size; /* every slot starts as a candidate */
+	MEMFINDInstance->tableTruth.resize(range, true);
+	MEMFINDInstance->tableValue.reserve(range);
+	for (uint32_t i = MEMFINDInstance->baseLinear; i < MEMFINDInstance->baseLinear + range; i++) {
+		uint8_t b = 0;
+		mem_readb_checked((PhysPt)i, &b);
+		MEMFINDInstance->tableValue.push_back(b);
+	}
+	return 0;
+}
+
+long MCP_ScanFilter(int opType, bool usePrev, uint32_t value) {
+	if (MEMFINDInstance == NULL) return -1;
+	if (!usePrev) {
+		if (((value > 0xFF) && MEMFINDInstance->size == 1) ||
+		    ((value > 0xFFFF) && MEMFINDInstance->size == 2))
+			return -2; /* value wider than the element size */
+		MEMFINDInstance->value = value;
+	}
+	MEMFINDInstance->opType = (uint8_t)opType;
+	MEMFINDInstance->usePreviousValue = usePrev;
+	uint32_t matches = 0;
+	uint32_t y = 0;
+	for (uint32_t i = MEMFINDInstance->baseLinear;
+	     i < MEMFINDInstance->baseLinear + MEMFINDInstance->range;
+	     i += MEMFINDInstance->size) {
+		uint32_t valfind = 0;
+		uint32_t cmp = usePrev ? 0 : value;
+		switch (MEMFINDInstance->size) {
+			case 2: { uint16_t v = 0; mem_readw_checked((PhysPt)i, &v); valfind = v;
+			          if (usePrev) memcpy(&cmp, &MEMFINDInstance->tableValue[y], 2); } break;
+			case 4: { uint32_t v = 0; mem_readd_checked((PhysPt)i, &v); valfind = v;
+			          if (usePrev) memcpy(&cmp, &MEMFINDInstance->tableValue[y], 4); } break;
+			default:{ uint8_t  v = 0; mem_readb_checked((PhysPt)i, &v); valfind = v;
+			          if (usePrev) memcpy(&cmp, &MEMFINDInstance->tableValue[y], 1); } break;
+		}
+		bool ok;
+		switch (opType) {
+			case 1:  ok = (valfind >  cmp); break;
+			case 2:  ok = (valfind <  cmp); break;
+			case 3:  ok = (valfind != cmp); break;
+			case 4:  ok = (valfind >= cmp); break;
+			case 5:  ok = (valfind <= cmp); break;
+			default: ok = (valfind == cmp); break;
+		}
+		if (ok && MEMFINDInstance->tableTruth[y]) matches++;
+		else MEMFINDInstance->tableTruth[y] = false;
+		y += MEMFINDInstance->size;
+	}
+	MEMFINDInstance->matches = matches;
+	MEMFINDInstance->iterations++;
+	return (long)matches;
+}
+
+bool MCP_ScanState(uint16_t *seg, uint32_t *ofs, uint32_t *baseLinear,
+                   uint8_t *size, uint32_t *range, uint32_t *matches,
+                   uint32_t *iterations) {
+	if (MEMFINDInstance == NULL) return false;
+	if (seg)        *seg        = MEMFINDInstance->seg;
+	if (ofs)        *ofs        = MEMFINDInstance->ofs;
+	if (baseLinear) *baseLinear = MEMFINDInstance->baseLinear;
+	if (size)       *size       = MEMFINDInstance->size;
+	if (range)      *range      = MEMFINDInstance->range;
+	if (matches)    *matches    = MEMFINDInstance->matches;
+	if (iterations) *iterations = MEMFINDInstance->iterations;
+	return true;
+}
+
+int MCP_ScanResults(uint32_t start, int max, uint32_t *total,
+                    uint16_t *seg_arr, uint32_t *ofs_arr,
+                    uint32_t *lin_arr, uint32_t *val_arr) {
+	if (MEMFINDInstance == NULL) { if (total) *total = 0; return -1; }
+	uint32_t matchIdx = 0;
+	int filled = 0;
+	uint32_t y = 0;
+	for (uint32_t i = MEMFINDInstance->baseLinear;
+	     i < MEMFINDInstance->baseLinear + MEMFINDInstance->range;
+	     i += MEMFINDInstance->size) {
+		if (MEMFINDInstance->tableTruth[y]) {
+			if (matchIdx >= start && filled < max) {
+				uint32_t valfind = 0;
+				switch (MEMFINDInstance->size) {
+					case 2: { uint16_t v = 0; mem_readw_checked((PhysPt)i, &v); valfind = v; } break;
+					case 4: { uint32_t v = 0; mem_readd_checked((PhysPt)i, &v); valfind = v; } break;
+					default:{ uint8_t  v = 0; mem_readb_checked((PhysPt)i, &v); valfind = v; } break;
+				}
+				uint32_t delta = i - MEMFINDInstance->baseLinear;
+				if (seg_arr) seg_arr[filled] = MEMFINDInstance->seg;
+				if (ofs_arr) ofs_arr[filled] = MEMFINDInstance->ofs + delta;
+				if (lin_arr) lin_arr[filled] = i;
+				if (val_arr) val_arr[filled] = valfind;
+				filled++;
+			}
+			matchIdx++;
+		}
+		y += MEMFINDInstance->size;
+	}
+	if (total) *total = matchIdx;
+	return filled;
+}
 #endif
 
 #ifdef WIN32

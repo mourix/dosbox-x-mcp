@@ -52,6 +52,7 @@ contrib/linux/com.dosbox_x.DOSBox-X.metainfo.xml
 Makefile
 config.h
 config.status
+config.cache
 stamp-h1
 
 # macOS Universal Binary intermediates

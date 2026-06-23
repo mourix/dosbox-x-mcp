@@ -15,6 +15,19 @@
 #   MCP_JOBS=N            parallel make jobs           (default: nproc)
 #   MCP_SKIP_SDL=1        reuse already-built in-tree SDL1/SDLnet libs
 #   MCP_SKIP_ISOLATION=1  skip the no-flag isolation rebuild (faster dev loop)
+#   MCP_FORCE_SDL=1       rebuild the in-tree SDL even if its libs already exist
+#   MCP_NO_CCACHE=1       do not route the compiler through ccache
+#
+# Speed model: 16 idle cores during this script means the cost is in the
+# *serialized* phases (two ./configure runs, the isolation full rebuild) rather
+# than the -j make. So by default we: route the compiler through ccache (the
+# isolation build flips C_MCP in config.h, which otherwise forces a full
+# ~500-object recompile — ccache turns it into mostly cache hits), reuse a
+# config.cache across both configures, and skip the SDL rebuild when its libs
+# already exist. Each skip has an explicit override above, and the isolation
+# build + full test suite still run, so nothing verified is dropped. (autogen is
+# left to run every time — it is ~3 s and doesn't rebuild configure unless
+# configure.ac changed, so there is nothing to gain by gating it.)
 
 set -euo pipefail
 
@@ -22,6 +35,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 JOBS="${MCP_JOBS:-$(nproc 2>/dev/null || echo 2)}"
+
+# Route the compiler through ccache when available (huge win for the isolation
+# rebuild and for re-runs: identical translation units become cache hits).
+if [ "${MCP_NO_CCACHE:-0}" != "1" ] && command -v ccache >/dev/null 2>&1; then
+    export CC="${CC:-ccache gcc}" CXX="${CXX:-ccache g++}"
+fi
 
 log()  { printf '\n=== mcp-check: %s ===\n' "$*"; }
 fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
@@ -55,26 +74,36 @@ run_tests() {
 }
 
 # configure + make for the given extra flags; leaves src/dosbox-x freshly built.
+# -C reuses config.cache across both configures (and across runs): the cached
+# results are compiler/library feature tests, independent of --enable-mcp, so
+# sharing them is safe and cuts the single-threaded configure time sharply.
 build() {
     log "configure $*"
-    ./configure --enable-debug=heavy --prefix=/usr "$@"
+    ./configure -C --enable-debug=heavy --prefix=/usr "$@"
     log "make -j$JOBS"
     make -j"$JOBS"
 }
 
-# 1. Regenerate the build system.
+# 1. Regenerate the build system (cheap: ~3 s, and a no-op for configure unless
+# configure.ac changed).
 log "autogen"
 ./autogen.sh
 
-# 2. Build the in-tree (heavily patched) SDL1 + SDLnet.
-if [ "${MCP_SKIP_SDL:-0}" != "1" ]; then
+# 2. Build the in-tree (heavily patched) SDL1 + SDLnet — only when needed. These
+# sources change very rarely, so reuse the libs if they already exist.
+sdl_libs_present() {
+    [ -f vs/sdl/linux-host/lib/libSDL.a ] && [ -f vs/sdlnet/linux-host/lib/libSDL_net.a ]
+}
+if [ "${MCP_SKIP_SDL:-0}" = "1" ]; then
+    log "skipping SDL build (MCP_SKIP_SDL=1)"
+elif [ "${MCP_FORCE_SDL:-0}" != "1" ] && sdl_libs_present; then
+    log "skipping SDL build (in-tree libs already present; MCP_FORCE_SDL=1 to rebuild)"
+else
     chmod +x vs/sdl/build-scripts/strip_fPIC.sh
     log "building in-tree SDL 1.x"
     ( cd vs/sdl && ./build-dosbox.sh )
     log "building in-tree SDLnet 1.x"
     ( cd vs/sdlnet && ./build-dosbox.sh )
-else
-    log "skipping SDL build (MCP_SKIP_SDL=1)"
 fi
 chmod +x configure
 

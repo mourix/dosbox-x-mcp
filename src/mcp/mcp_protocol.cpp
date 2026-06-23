@@ -997,6 +997,40 @@ Json format_lifecycle(LifecycleOp op) {
     return r;
 }
 
+// -- debugger_command passthrough (Slice 13) -------------------------------
+
+bool parse_debugger_command_request(const Json &params, std::string &cmd, std::string &err) {
+    const Json *c = params.find("command");
+    if (c == nullptr || !c->isString()) { err = "missing/invalid command"; return false; }
+    cmd = c->asString();
+    if (cmd.empty()) { err = "command must be non-empty"; return false; }
+    return true;
+}
+
+void passthrough_append(std::string &acc, const std::string &line, bool &truncated) {
+    /* Already at the cap: drop and mark truncated (the byte ceiling is the
+     * runtime side of guardrail #3 — never a firehose). */
+    if (acc.size() >= MCP_PASSTHROUGH_MAX) { truncated = true; return; }
+    size_t room = MCP_PASSTHROUGH_MAX - acc.size();
+    if (line.size() + 1 <= room) {           /* line + '\n' both fit */
+        acc.append(line);
+        acc.push_back('\n');
+    } else {                                  /* clip to what fits, then stop */
+        acc.append(line, 0, room);
+        truncated = true;
+    }
+}
+
+Json format_debugger_command(const std::string &cmd, const std::string &output,
+                             bool truncated, bool recognized) {
+    Json r = Json::object();
+    r.set("command", Json::str(cmd));
+    r.set("recognized", Json::boolean(recognized));
+    r.set("truncated", Json::boolean(truncated));
+    r.set("output", Json::str(output));
+    return r;
+}
+
 const std::string &defer_sentinel() {
     /* Leading control byte → never a valid JSON response line, so the server can
      * distinguish "re-queue me" from a real reply with a simple equality check. */
@@ -1225,6 +1259,19 @@ std::string dispatch(const std::string &method, const Json &params,
         std::vector<ScanMatch> matches;
         uint32_t total = scan_results(start, MCP_LIST_MAX, matches);
         return enforce_max_payload(id, make_result(id, format_scan_results(st, matches, start, total, MCP_LIST_MAX)));
+    }
+
+    if (method == "debugger_command") {
+        /* Parked-class: mode_matches guaranteed STATE_PARKED above, so ParseCommand
+         * runs in the same context the debugger's own input handler does. The
+         * output is captured + truncated to MCP_PASSTHROUGH_MAX by the bridge. */
+        std::string cmd, perr;
+        if (!parse_debugger_command_request(params, cmd, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        std::string out;
+        bool truncated = false;
+        bool recognized = run_debugger_command(cmd, out, truncated);
+        return enforce_max_payload(id, make_result(id, format_debugger_command(cmd, out, truncated, recognized)));
     }
 
     /* Known method whose handler arrives in a later slice. */

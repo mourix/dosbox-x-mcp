@@ -5,17 +5,17 @@ MCP server to **reverse-engineer DOS applications**. It describes *workflows*. T
 authoritative reference for tool names and parameters is the MCP tool definitions
 themselves (the single source of truth) — this manual does not duplicate schemas.
 
-> Status: **early.** The transport is live (Slice 2): a TCP JSON-RPC server with
-> `ping` / `server_info`. State-touching tools landed so far: `read_registers` (Slice 3),
+> Status: **complete.** The full toolset is live. Transport (Slice 2): a TCP JSON-RPC
+> server with `ping` / `server_info`. State-touching tools: `read_registers` (Slice 3),
 > `read_memory` + `disassemble` (Slice 4), execution control `step` / `step_over` /
 > `continue` / `break` (Slice 5), breakpoints `breakpoint_list` / `breakpoint_add` /
 > `breakpoint_delete` (Slice 6), writes `write_register` / `write_memory` (Slice 7),
 > input injection `send_keys` / `type_text` / `mouse` (Slice 8), screen reads
 > `read_screen` / `screen_hash` (Slice 9), `take_screenshot` (Slice 10), the memory
-> scanner `scan_start` / `scan_filter` / `scan_results` (Slice 11), and in-session
-> lifecycle `reset` / `quit` plus the `scripts/mcp-launch.sh` launcher (Slice 12).
-> Remaining tools land in later slices. Keep workflows here in sync with the implemented
-> tools; update on every feature.
+> scanner `scan_start` / `scan_filter` / `scan_results` (Slice 11), in-session
+> lifecycle `reset` / `quit` plus the `scripts/mcp-launch.sh` launcher (Slice 12), and
+> the `debugger_command` passthrough escape hatch (Slice 13). Keep workflows here in
+> sync with the tool set; update on every change.
 
 ## Build flag
 
@@ -94,12 +94,12 @@ The emulator is either **running** (CPU free-running; the game executes) or **pa
 
 If you send a parked-class tool while running (or vice-versa) you get the `-32001`
 mismatch error telling you the current state; switch with `break` / `continue` first.
-(Implemented so far: the `any`-class `ping` / `server_info`; the parked-class
-`read_registers`, `read_memory`, `disassemble`, `step`, `step_over`, `continue`,
-`write_register`, `write_memory`, `breakpoint_list`, `breakpoint_add`,
-`breakpoint_delete`; and the run-class `break`, `send_keys`, `type_text`, `mouse`,
-`read_screen`, `screen_hash`, `take_screenshot`. The remaining tools are already classified
-so mismatches are reported correctly, but their handlers land in later slices.)
+The full tool set by class: the `any`-class `ping` / `server_info` / `reset` / `quit`;
+the parked-class `read_registers`, `read_memory`, `disassemble`, `step`, `step_over`,
+`continue`, `write_register`, `write_memory`, `breakpoint_list`, `breakpoint_add`,
+`breakpoint_delete`, `scan_start`, `scan_filter`, `scan_results`, `debugger_command`;
+and the run-class `break`, `send_keys`, `type_text`, `mouse`, `read_screen`,
+`screen_hash`, `take_screenshot`.
 
 ## Mental model
 
@@ -109,7 +109,7 @@ so mismatches are reported correctly, but their handlers land in later slices.)
 - Responses are **bounded** (paginated). For large memory/disasm ranges, request a window
   and page through it rather than asking for everything at once.
 
-## Core workflows (to be filled in as tools are added)
+## Core workflows
 
 ### Attach / inspect state
 Connect over TCP (the `MCP_PORT` the launcher set), then `ping` to confirm liveness and
@@ -316,8 +316,45 @@ process exits (you do not need to send a signal to stop it). After `reset`, poll
 the state settles (and, under `--break-start`, until it is `parked` again) before issuing more
 tools. After `quit`, the connection drops as the process exits; do not send further requests.
 
+### Escape hatch: raw debugger commands
+**`debugger_command`** is a **parked**-class passthrough to the built-in debugger's command
+interpreter (the same ~110 commands you'd type into the interactive TUI — `MEMDUMP`, `EV`,
+`GDT`/`IDT`/`LDT`, `BPLIST`, `INTHAND`, register/descriptor dumps, …). It takes a single
+`command` string, runs it through `ParseCommand`, and returns
+`{command, recognized, truncated, output}` where `output` is the captured `DEBUG_ShowMsg`
+text (bounded to **16 KiB** — `truncated: true` if the command printed more). `recognized` is
+the interpreter's own flag: `false` means the command word wasn't matched.
+
+Use it for the long tail of debugger features that have **no dedicated tool**. Prefer the
+typed tools for anything they cover — they return structured JSON, while `debugger_command`
+gives you raw text you have to parse. **Avoid execution-affecting commands** (`RUN`, `G`,
+`RUNWATCH`, …): they resume the CPU out from under the dispatcher and leave the session in a
+state the typed `step` / `continue` / `break` tools manage cleanly — use those instead. Treat
+`debugger_command` as read-only introspection.
+
 ### Typical reverse-engineering loop
-_TODO: load target → break at entry → step → inspect → map behavior → record findings._
+A full session ties the tools together:
+
+1. **Launch** the target with `scripts/mcp-launch.sh --mount ./game --run GAME.EXE
+   --break-start` (parks at reset) and connect to the `MCP_PORT` it set.
+2. **Get parked** — poll `ping` until `state: parked` (or `break` a running guest).
+3. **Find the code of interest.** Plant a breakpoint where you expect activity —
+   `breakpoint_add type=int int=0x21` to catch DOS calls, or `type=exec seg:off` at a known
+   address — then `continue` and poll `ping` until parked.
+4. **Inspect at the stop** — `read_registers`, `disassemble` CS:EIP, `read_memory` around the
+   pointers in the registers. `step` / `step_over` through the routine, re-inspecting each stop.
+5. **Locate a variable** (score/health/timer) with the scanner: `scan_start` over a likely
+   range → change the value in the guest (`continue`, inject input, `break`) → `scan_filter`
+   for the new value → repeat until `scan_results` is a handful of addresses. Plant a
+   `mem`/`mem_freeze` watch to catch (or pin) writes.
+6. **Drive the guest** when you need to reach a state: `continue`, then `type_text` / `send_keys`
+   / `mouse`, and watch with `read_screen` / `screen_hash` (or `take_screenshot` in graphics
+   modes). `break` again to dig back in.
+7. **Confirm hypotheses** by mutating: `write_register` / `write_memory`, continue, observe.
+8. **Reset** to a clean state (`reset`) to re-run an experiment, or `quit` when done.
+
+Throughout, prefer the smallest query, page through large ranges, and switch states explicitly
+(`break` ↔ `continue`) so parked-class and run-class tools land in the right mode.
 
 ## Conventions
 

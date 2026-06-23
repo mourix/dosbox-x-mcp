@@ -98,6 +98,7 @@ glance. Adding a core edit means adding a line here with its justification.
 | Skip the no-tty guard in `DEBUG_Enable_Handler` | `debug.cpp:5015` | The Linux/macOS branch returns early (debugger "not available") when stdin/stdout/stderr aren't a terminal, so `-break-start` would never park under the headless harness (pipes, no tty). Compiled out under `#if ... && !C_MCP`: the MCP build has no ncurses TUI and its input source is the request queue, so the debugger must engage headless (Slice 3). |
 | Execution-control entry point `MCP_DebugExec()` | `debug.cpp` (after `DEBUG_Run`) | one `#if C_MCP` function the MCP module calls to drive step/step_over/continue/break (Slice 5). It must live in `debug.cpp` because it manipulates debugger statics that are not exported — `debugging`, `exitLoop`, `mustCompleteInstruction`, and the static `StepOver()` — and it reuses the exact primitives the F11/F10/F5 key handlers and `-break-start` use (`DEBUG_Run`, `DEBUG_EnableDebugger`). Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
 | Breakpoint bridge `MCP_Breakpoint{Add,Delete,Count,Get}()` + two `CBreakpoint` friend decls | `debug.cpp` (after `MCP_DebugExec`; friends near `BPoints`) | `#if C_MCP` free functions the MCP module calls for breakpoint_list/add/delete (Slice 6). They must live in `debug.cpp` because the breakpoint store (`CBreakpoint` and its private static `BPoints`) is not exported. Add/Delete reuse the public `CBreakpoint::Add*`/`DeleteByIndex`/`DeleteAll` API the BP/BPINT/BPM/BPDEL commands use; the two list-readers need `BPoints`, so they are `friend`s of `CBreakpoint` (the same pattern as the existing `DEBUG_HeavyIsBreakpoint` friend). Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
+| DEBUG_ShowMsg capture hook | `DEBUG_ShowMsg`, `debug_gui.cpp` | one `#if C_MCP` line — `MCP_DebugCaptureLine(buf)` after the message is formatted — so the `debugger_command` passthrough (Slice 13) can capture the command's `DEBUG_ShowMsg` output. The hook is a no-op unless a passthrough is actively capturing (state + capping live in `src/mcp/mcp_passthrough.cpp`), so normal debugger output is unchanged. `ParseCommand` itself is global linkage and called directly from the bridge — no edit needed there. Compiled away entirely without `--enable-mcp`. |
 | Memory-scanner bridge `MCP_Scan{Start,Filter,State,Results,Cancel}()` | `debug.cpp` (after `MCP_BreakpointGet`) | `#if C_MCP` free functions the MCP module calls for scan_start/scan_filter/scan_results (Slice 11). They must live in `debug.cpp` because the scanner store — the single global `MEMFINDInstance` and its file-private `MEMFinder` struct — is not exported. They mirror the existing MEMFIND-start / MEMS-filter / MEMFIND-L-list algorithms exactly, exposing structured out-params instead of `DEBUG_ShowMsg` text. Two programmatic-client conveniences vs the interactive commands: Start replaces an in-progress scan (MEMFIND rejects it), and Filter does not auto-delete the instance at 0 matches (MEMS does) so Results stays callable. The existing MEMFIND/MEMS `ParseCommand` handlers are **unchanged**. Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
 
 **Slice 12 (lifecycle: launcher + reset/quit) adds no new core edit.** The reset/quit throw
@@ -495,6 +496,29 @@ optional **bounded** `debugger_command` passthrough that runs any of the ~110 `P
 captures+truncates `DEBUG_ShowMsg` output.
 **Tests:** unit — passthrough output truncation. Docs reviewed against implemented tools.
 **DoD:** `mcp-check.sh` green; manual matches the tool set.
+
+**Outcome (resolved):** ✅ Shipped. Both halves landed. (1) The `debugger_command` passthrough
+runs any of the debugger's ~110 `ParseCommand` commands while parked and returns its captured
+`DEBUG_ShowMsg` output, truncated to `MCP_PASSTHROUGH_MAX` (16 KiB). Same reader/formatter split as
+the other parked slices: param parsing (`parse_debugger_command_request`), the capped-append helper
+(`passthrough_append`), and JSON formatting (`format_debugger_command` → `{command, recognized,
+truncated, output}`) are pure in `mcp_protocol.cpp` (unit-tested with no boot); the `ParseCommand`
+call + output capture live in the bridge `src/mcp/mcp_passthrough.cpp`. `ParseCommand` is global
+linkage, so the **single Slice 13 core edit** is a one-line capture hook in `DEBUG_ShowMsg`
+(`debug_gui.cpp`, in the manifest above) — `MCP_DebugCaptureLine(buf)`, a no-op unless a passthrough
+is capturing — and the cap goes through the pure `passthrough_append` so the truncation is exactly
+what the unit tests assert. The handler is parked-class (already in the Slice 2 classify table) and
+reached only when `STATE_PARKED`, the same context the debugger's own input handler runs commands in;
+execution-affecting commands (RUN/G/…) are documented as better driven by the dedicated
+step/continue tools. Unit tests: `tests/mcp_protocol_tests.cpp` (`Mcp.ParseDebuggerCommand`,
+`Mcp.PassthroughAppend*` — accumulation, the 16 KiB cap, and clipping the line that crosses it —
+`Mcp.FormatDebuggerCommand`, `Mcp.DebuggerCommandClassification`). Integration:
+`scripts/mcp_slice13_passthrough.py` boots headless parked (`-break-start`), runs `EV 10+20`
+(asserts `recognized:true`, deterministic captured output, `truncated:false`, the payload bound), an
+unknown command (`recognized:false`), and the missing-`command` `-32602` rejection; wired into
+`scripts/mcp-check.sh` (integration test #13). (2) `docs/MCP_MANUAL.md` is finalized — every
+implemented tool has a workflow, the status note covers all 13 slices, and the reverse-engineering
+loop is filled in.
 
 ---
 

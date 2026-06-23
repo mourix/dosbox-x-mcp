@@ -727,6 +727,13 @@ void DEBUG_ShowMsg(char const* format,...) {
     /* remove newlines if present */
     while (len > 0 && buf[len-1] == '\n') buf[--len] = 0;
 
+#if C_MCP
+    /* MCP debugger_command passthrough capture (Slice 13). A no-op unless a
+     * passthrough is active; see src/mcp/mcp_passthrough.cpp. */
+    void MCP_DebugCaptureLine(const char *line);
+    MCP_DebugCaptureLine(buf);
+#endif
+
 #if C_DEBUG
 	if (dbg.win_out != NULL)
 		stderrlog = false;

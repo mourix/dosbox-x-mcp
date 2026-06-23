@@ -5,9 +5,9 @@
 # Guardrail #2 ("one-command verification"): "ran the tests" means "ran this
 # script and it passed". It:
 #   1. regenerates the build system (autogen) and the in-tree SDL1/SDLnet,
-#   2. builds dosbox-x WITH --enable-mcp and runs the unit + baseline test suite
-#      (and the Mcp.* smoke test) headless,
-#   3. rebuilds the core WITHOUT --enable-mcp to prove isolation (guardrail #1).
+#   2. builds the core WITHOUT --enable-mcp to prove isolation (guardrail #1),
+#   3. builds dosbox-x WITH --enable-mcp (last, so it is the binary left on disk)
+#      and runs the unit + baseline + Mcp.* test suites and the integration tests.
 #
 # Linux only (the MCP build rides the in-tree SDL1 + ncurses debugger).
 #
@@ -65,6 +65,12 @@ run_tests() {
     rc=$?
     set -e
     printf '%s\n' "$out"
+    # A run that matched no tests is a failure, not a pass: it means the filter
+    # matched nothing or the suite was not linked into the binary (e.g. an
+    # --enable-mcp build is missing, so Mcp.* would silently "pass" vacuously).
+    if printf '%s' "$out" | grep -q '0 tests from 0 test suites ran'; then
+        fail "$desc — gtest ran 0 tests (filter matched nothing or suite not linked)"
+    fi
     if printf '%s' "$out" | grep -q 'Unit test completed: success' \
        && ! printf '%s' "$out" | grep -q '\[  FAILED  \]'; then
         [ "$rc" -ne 0 ] && printf 'WARN: tests passed; dosbox-x exited %d on shutdown (known headless teardown crash, ignored)\n' "$rc"
@@ -107,14 +113,28 @@ else
 fi
 chmod +x configure
 
-# 3. Build WITH --enable-mcp and verify the flag took effect.
+# 3. Isolation proof FIRST: the core must still build with the flag OFF. Run
+# before the --enable-mcp build (not after) so the MCP-enabled binary is the
+# artifact left on disk when the script finishes. Otherwise an isolation build
+# at the end would leave a no-C_MCP binary, and an ad-hoc
+# `./src/dosbox-x -tests --gtest_filter=Mcp.*` afterward would find zero tests.
+if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
+    build
+    grep -q '^#define C_MCP 1' config.h && fail "C_MCP defined without --enable-mcp"
+    log "isolation build OK (no --enable-mcp)"
+else
+    log "skipping isolation build (MCP_SKIP_ISOLATION=1)"
+fi
+
+# 4. Build WITH --enable-mcp and verify the flag took effect. This is the LAST
+# build, so src/dosbox-x is left as the MCP-enabled binary for ad-hoc test runs.
 build --enable-mcp
 grep -q '^#define C_MCP 1' config.h || fail "C_MCP not defined in config.h after --enable-mcp"
 
 run_tests "running unit + baseline test suite (headless)"
-run_tests "running Mcp.* smoke test (headless)" --gtest_filter=Mcp.*
+run_tests "running Mcp.* unit suite (headless)" --gtest_filter=Mcp.*
 
-# 3b. Integration tests (scripted, out-of-process) against the --enable-mcp build.
+# 4b. Integration tests (scripted, out-of-process) against the --enable-mcp build.
 log "running integration test #1: headless screenshot (Slice 1)"
 python3 scripts/mcp_slice1_screenshot.py || fail "integration test #1 (headless screenshot) failed"
 
@@ -151,13 +171,7 @@ python3 scripts/mcp_slice11_scan.py || fail "integration test #11 (memory scanne
 log "running integration test #12: lifecycle launcher + reset/quit (Slice 12)"
 python3 scripts/mcp_slice12_lifecycle.py || fail "integration test #12 (lifecycle) failed"
 
-# 4. Isolation proof: the core must still build with the flag OFF.
-if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
-    build
-    grep -q '^#define C_MCP 1' config.h && fail "C_MCP defined without --enable-mcp"
-    log "isolation build OK (no --enable-mcp)"
-else
-    log "skipping isolation build (MCP_SKIP_ISOLATION=1)"
-fi
+log "running integration test #13: debugger_command passthrough (Slice 13)"
+python3 scripts/mcp_slice13_passthrough.py || fail "integration test #13 (debugger_command passthrough) failed"
 
 log "PASSED"

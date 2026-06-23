@@ -645,6 +645,39 @@ void lifecycle_request(LifecycleOp op);
 /* Pure: format the lifecycle acknowledgement reply. */
 Json format_lifecycle(LifecycleOp op);
 
+/* ---- debugger_command passthrough (Slice 13) ----------------------------
+ *
+ * The escape hatch: run any of the debugger's ~110 ParseCommand commands and
+ * return its captured DEBUG_ShowMsg output, truncated to MCP_PASSTHROUGH_MAX
+ * (16 KiB). Parked-class. Same reader/formatter split as the other slices: the
+ * param parsing, JSON formatting, and the capped-append helper are pure here
+ * (unit-tested with no boot); the actual ParseCommand call + output capture live
+ * in the bridge mcp_passthrough.cpp, which relies on the single Slice 13 core
+ * edit (the capture hook in DEBUG_ShowMsg, debug_gui.cpp). The reply carries
+ * whatever the command printed; execution-affecting commands (RUN/G/…) are
+ * better driven by the dedicated step/continue tools — see docs/MCP_MANUAL.md. */
+
+/* Pure: parse a debugger_command request (required, non-empty `command` string).
+ * Returns false + err on a missing/invalid/empty field. */
+bool parse_debugger_command_request(const Json &params, std::string &cmd, std::string &err);
+
+/* Pure: append `line` then '\n' to `acc`, capping the total length at
+ * MCP_PASSTHROUGH_MAX. Once the cap is reached further appends are dropped and
+ * `truncated` is set. The bridge's per-line capture hook uses this, so the
+ * truncation is unit-testable without a debugger boot. */
+void passthrough_append(std::string &acc, const std::string &line, bool &truncated);
+
+/* Pure: format the passthrough result as compact, bounded JSON
+ * ({command, recognized, truncated, output}). */
+Json format_debugger_command(const std::string &cmd, const std::string &output,
+                             bool truncated, bool recognized);
+
+/* Bridge (mcp_passthrough.cpp): run `cmd` through the debugger's ParseCommand on
+ * the emulator thread while parked, capturing the emitted DEBUG_ShowMsg lines
+ * (capped via passthrough_append). Returns ParseCommand's recognized flag; `out`
+ * and `truncated` are the captured text and whether it was clipped. */
+bool run_debugger_command(const std::string &cmd, std::string &out, bool &truncated);
+
 /* Internal sentinel reply meaning "not ready — re-queue and retry next frame".
  * Returned by dispatch for an in-progress take_screenshot; the server re-queues
  * the request instead of replying. Never sent to a client (it is not valid

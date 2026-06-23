@@ -142,17 +142,17 @@ TEST(Mcp, DispatchModeMismatchCarriesCurrentState)
     EXPECT_EQ(err->find("code")->asInt(), MCP_ERR_MODE_MISMATCH);
     EXPECT_EQ(err->find("data")->find("state")->asString(), "running");
 
-    // A parked-class request whose handler is not yet implemented
-    // (debugger_command arrives in Slice 13) succeeds the mode check while
-    // parked, so it reports not-implemented rather than a mismatch. (Must be a
-    // method whose handler is still a stub: dispatching an *implemented*
-    // state-touching tool here would invoke the real emulator-state bridge — not
-    // what this pure test wants.)
+    // A parked-class request arriving while parked clears the mode check and
+    // reaches its handler. debugger_command with empty params (no `command`)
+    // fails param validation with INVALID_PARAMS — not a mismatch — proving it
+    // got past the mode gate. (Empty params is deliberate: dispatching it with a
+    // real `command` here would invoke the ParseCommand bridge against the
+    // emulator, which this pure test must not do.)
     std::string line2 = dispatch("debugger_command", Json::object(), Json::integer(5), STATE_PARKED);
     Json r2;
     ASSERT_TRUE(Json::parse(line2, r2));
     ASSERT_NE(r2.find("error"), nullptr);
-    EXPECT_EQ(r2.find("error")->find("code")->asInt(), MCP_ERR_NOT_IMPLEMENTED);
+    EXPECT_EQ(r2.find("error")->find("code")->asInt(), MCP_ERR_INVALID_PARAMS);
 }
 
 // -- read_registers formatting (Slice 3) -----------------------------------
@@ -1329,6 +1329,98 @@ TEST(Mcp, LifecycleClassification)
     EXPECT_EQ(classify("quit"), CLS_ANY);
     EXPECT_TRUE(mode_matches(CLS_ANY, STATE_RUNNING));
     EXPECT_TRUE(mode_matches(CLS_ANY, STATE_PARKED));
+}
+
+// -- debugger_command passthrough (Slice 13) -------------------------------
+
+TEST(Mcp, ParseDebuggerCommand)
+{
+    std::string cmd, err;
+
+    Json p = Json::object();
+    p.set("command", Json::str("MEMDUMP DS:0 10"));
+    EXPECT_TRUE(parse_debugger_command_request(p, cmd, err));
+    EXPECT_EQ(cmd, "MEMDUMP DS:0 10");
+
+    // Missing command.
+    EXPECT_FALSE(parse_debugger_command_request(Json::object(), cmd, err));
+    EXPECT_FALSE(err.empty());
+
+    // Empty command string is rejected.
+    Json empty = Json::object();
+    empty.set("command", Json::str(""));
+    EXPECT_FALSE(parse_debugger_command_request(empty, cmd, err));
+
+    // Wrong type is rejected.
+    Json wrong = Json::object();
+    wrong.set("command", Json::integer(5));
+    EXPECT_FALSE(parse_debugger_command_request(wrong, cmd, err));
+}
+
+TEST(Mcp, PassthroughAppendAccumulatesLines)
+{
+    std::string acc;
+    bool truncated = false;
+    passthrough_append(acc, "alpha", truncated);
+    passthrough_append(acc, "beta", truncated);
+    EXPECT_EQ(acc, "alpha\nbeta\n");
+    EXPECT_FALSE(truncated);
+}
+
+TEST(Mcp, PassthroughAppendTruncatesAtCap)
+{
+    // Feed well past the 16 KiB cap and assert the accumulator never exceeds it
+    // and the truncated flag fires.
+    std::string acc;
+    bool truncated = false;
+    const std::string line(100, 'x');
+    for (int i = 0; i < 1000; i++)   // ~100 KiB of input
+        passthrough_append(acc, line, truncated);
+    EXPECT_TRUE(truncated);
+    EXPECT_LE(acc.size(), MCP_PASSTHROUGH_MAX);
+
+    // Once capped, further appends stay capped and don't grow.
+    size_t at_cap = acc.size();
+    passthrough_append(acc, "more", truncated);
+    EXPECT_EQ(acc.size(), at_cap);
+    EXPECT_TRUE(truncated);
+}
+
+TEST(Mcp, PassthroughAppendClipsTheLineThatCrossesTheCap)
+{
+    // A single oversized line is clipped to exactly the remaining room (no '\n'
+    // appended past the ceiling), and the rest is dropped.
+    std::string acc(MCP_PASSTHROUGH_MAX - 4, 'a');
+    bool truncated = false;
+    passthrough_append(acc, "bbbbbbbbbb", truncated);   // 10 chars, only 4 fit
+    EXPECT_EQ(acc.size(), MCP_PASSTHROUGH_MAX);
+    EXPECT_TRUE(truncated);
+}
+
+TEST(Mcp, FormatDebuggerCommand)
+{
+    Json r = format_debugger_command("R", "EAX=00000000\nEBX=00000001", false, true);
+    EXPECT_EQ(r.find("command")->asString(), "R");
+    EXPECT_TRUE(r.find("recognized")->asBool());
+    EXPECT_FALSE(r.find("truncated")->asBool());
+    EXPECT_EQ(r.find("output")->asString(), "EAX=00000000\nEBX=00000001");
+
+    // Unrecognised command, truncated output.
+    Json r2 = format_debugger_command("BOGUS", std::string(MCP_PASSTHROUGH_MAX, 'z'), true, false);
+    EXPECT_FALSE(r2.find("recognized")->asBool());
+    EXPECT_TRUE(r2.find("truncated")->asBool());
+
+    // Even a maxed-out capture serialises within the response ceiling.
+    EXPECT_LE(r2.serialize().size(), MCP_MAX_PAYLOAD);
+}
+
+// debugger_command is serviced while the CPU is parked (it runs ParseCommand in
+// the same context the debugger's own input handler does).
+TEST(Mcp, DebuggerCommandClassification)
+{
+    EXPECT_EQ(classify("debugger_command"), CLS_PARKED);
+    EXPECT_FALSE(mode_matches(CLS_PARKED, STATE_RUNNING));
+    EXPECT_TRUE(mode_matches(CLS_PARKED, STATE_PARKED));
 }
 
 } // namespace

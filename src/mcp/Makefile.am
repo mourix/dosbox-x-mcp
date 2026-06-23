@@ -11,4 +11,5 @@ libmcp_a_SOURCES = \
 	mcp_breakpoints.cpp \
 	mcp_input.cpp \
 	mcp_screen.cpp \
+	mcp_screenshot.cpp \
 	mcp_server.cpp mcp_server.h

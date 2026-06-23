@@ -142,6 +142,9 @@ python3 scripts/mcp_slice8_input.py || fail "integration test #8 (input injectio
 log "running integration test #9: screen reads (Slice 9)"
 python3 scripts/mcp_slice9_screen.py || fail "integration test #9 (screen reads) failed"
 
+log "running integration test #10: take_screenshot (Slice 10)"
+python3 scripts/mcp_slice10_screenshot.py || fail "integration test #10 (take_screenshot) failed"
+
 # 4. Isolation proof: the core must still build with the flag OFF.
 if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
     build

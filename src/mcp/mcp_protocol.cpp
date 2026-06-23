@@ -869,6 +869,27 @@ Json format_screen_hash(const ScreenHash &out) {
     return r;
 }
 
+/* ---- take_screenshot (Slice 10) ------------------------------------------ */
+
+Json format_screenshot(const ScreenshotResult &out) {
+    Json r = Json::object();
+    r.set("path", Json::str(out.path));
+    r.set("format", Json::str("png"));
+    r.set("width", Json::integer((long long)out.width));
+    r.set("height", Json::integer((long long)out.height));
+    r.set("bytes", Json::integer((long long)out.bytes));
+    r.set("mode", Json::integer((long long)out.mode));
+    r.set("is_text", Json::boolean(out.is_text));
+    return r;
+}
+
+const std::string &defer_sentinel() {
+    /* Leading control byte → never a valid JSON response line, so the server can
+     * distinguish "re-queue me" from a real reply with a simple equality check. */
+    static const std::string s("\x01" "__MCP_DEFER__");
+    return s;
+}
+
 std::string dispatch(const std::string &method, const Json &params,
                      const Json &id, ExecState state) {
     (void)params;
@@ -1027,6 +1048,20 @@ std::string dispatch(const std::string &method, const Json &params,
         ScreenHash out;
         screen_hash(out);
         return enforce_max_payload(id, make_result(id, format_screen_hash(out)));
+    }
+    if (method == "take_screenshot") {
+        /* Async capture (see screenshot_service): PENDING re-queues this request
+         * via the defer sentinel; READY/ERROR complete it. Run-class — mode_matches
+         * guaranteed STATE_RUNNING above, so the frame loop is ticking and the
+         * RENDER/CAPTURE_AddImage path will emit a PNG. */
+        ScreenshotResult out;
+        ShotStatus st = screenshot_service(out);
+        if (st == SHOT_PENDING)
+            return defer_sentinel();
+        if (st == SHOT_ERROR)
+            return make_error(id, MCP_ERR_INTERNAL,
+                              out.error.empty() ? "screenshot failed" : out.error);
+        return enforce_max_payload(id, make_result(id, format_screenshot(out)));
     }
 
     /* Known method whose handler arrives in a later slice. */

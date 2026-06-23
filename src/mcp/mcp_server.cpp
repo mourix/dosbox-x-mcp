@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "logging.h"
 
@@ -253,6 +254,12 @@ void Server::serverThread() {
 void Server::drain(ExecState state) {
     if (!running_) return;
 
+    /* Requests a handler asked to retry next frame (take_screenshot's async
+     * capture; see defer_sentinel). Held aside so they don't spin within this
+     * drain, then re-queued at the end to be reattempted on the next frame —
+     * always under the waiting client's 5 s timeout. */
+    std::vector<RequestPtr> deferred;
+
     for (;;) {
         RequestPtr req;
         {
@@ -264,12 +271,23 @@ void Server::drain(ExecState state) {
 
         std::string reply = dispatch(req->method, req->params, req->id, state);
 
+        if (reply == defer_sentinel()) {
+            deferred.push_back(req);   /* not done yet — retry next frame */
+            continue;
+        }
+
         {
             std::lock_guard<std::mutex> lk(req->m);
             req->reply = reply;
             req->done = true;
         }
         req->cv.notify_one();
+    }
+
+    if (!deferred.empty()) {
+        std::lock_guard<std::mutex> lk(g_queue_mutex);
+        for (size_t i = 0; i < deferred.size(); i++)
+            g_queue.push_back(deferred[i]);
     }
 }
 

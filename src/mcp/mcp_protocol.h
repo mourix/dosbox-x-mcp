@@ -494,10 +494,58 @@ void screen_hash(ScreenHash &out);
  * string so no precision is lost crossing JSON's double). */
 Json format_screen_hash(const ScreenHash &out);
 
+/* ---- take_screenshot (Slice 10) -----------------------------------------
+ *
+ * Full-fidelity graphics capture on demand: trigger a PNG of the current frame
+ * and return its path + metadata (never raw pixels). Run-class — it rides the
+ * RENDER/CAPTURE_AddImage path that emits a frame at the GFX_Events tick (the
+ * same path Slice 1 verified under the dummy video driver).
+ *
+ * The capture is inherently *asynchronous*: setting CAPTURE_IMAGE only flushes a
+ * PNG on the next rendered frame, after the handler has returned. Rather than
+ * block the emulator thread (forbidden — handlers must be non-blocking), the
+ * bridge runs a tiny per-frame state machine: the first service call snapshots
+ * the capture dir and arms the capture; later calls watch for the new PNG. While
+ * pending, dispatch returns defer_sentinel() and the server re-queues the request
+ * to retry next frame, all under the client's 5 s wait. No core edit — the bridge
+ * reuses CaptureState/CAPTURE_IMAGE (hardware.h), capturedir, CurMode and
+ * render.src, like the Slice 9 screen bridge. */
+
+enum ShotStatus { SHOT_PENDING, SHOT_READY, SHOT_ERROR };
+
+/* A completed capture. width/height/bytes come from the written PNG (IHDR +
+ * file size; falls back to render.src dims). mode/is_text are the source video
+ * mode at trigger time. On SHOT_ERROR only `error` is meaningful. */
+struct ScreenshotResult {
+    std::string path;     /* absolute path to the written PNG       */
+    int         width;
+    int         height;
+    long        bytes;    /* PNG file size on disk                   */
+    int         mode;     /* CurMode->mode at capture                */
+    bool        is_text;  /* source was a text mode                  */
+    std::string error;    /* set only when status == SHOT_ERROR      */
+};
+
+/* Bridge (mcp_screenshot.cpp): advance the async capture one frame at a time on
+ * the emulator thread. Returns SHOT_PENDING until the PNG is written (the
+ * dispatcher re-queues via defer_sentinel), then SHOT_READY (out filled) or
+ * SHOT_ERROR (out.error set: no capture dir, or no frame within the deadline). */
+ShotStatus screenshot_service(ScreenshotResult &out);
+
+/* Pure: format a completed capture as compact JSON. */
+Json format_screenshot(const ScreenshotResult &out);
+
+/* Internal sentinel reply meaning "not ready — re-queue and retry next frame".
+ * Returned by dispatch for an in-progress take_screenshot; the server re-queues
+ * the request instead of replying. Never sent to a client (it is not valid
+ * JSON, so it can never collide with a real response line). */
+const std::string &defer_sentinel();
+
 /* Pure dispatch: given a parsed request and the current execution state, return
  * the full response line. Handles unknown methods, mode-mismatch fast-reject,
  * and the ping / server_info handlers. State-touching handlers (later slices)
- * return MCP_ERR_NOT_IMPLEMENTED for now. */
+ * return MCP_ERR_NOT_IMPLEMENTED for now. An in-progress take_screenshot returns
+ * defer_sentinel() (the server re-queues it; see above). */
 std::string dispatch(const std::string &method, const Json &params,
                      const Json &id, ExecState state);
 

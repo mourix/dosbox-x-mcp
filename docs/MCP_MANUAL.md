@@ -36,7 +36,8 @@ capture path produces a PNG under the dummy video driver. It uses a temporary
 self-test hook gated behind the `MCP_SELFTEST_SCREENSHOT` env var (with optional
 `MCP_SELFTEST_FRAMES`): when set, the emulator requests one screenshot after the guest
 boots. This is scaffolding to de-risk the screen pillar — the real screen reads
-(`read_screen` / `screen_hash`) landed in Slice 9; `take_screenshot` arrives in Slice 10.
+(`read_screen` / `screen_hash`) landed in Slice 9 and `take_screenshot` (the on-demand PNG
+capture promoted from this self-test) in Slice 10.
 
 ## Connecting to the server (transport)
 
@@ -78,8 +79,8 @@ mismatch error telling you the current state; switch with `break` / `continue` f
 `read_registers`, `read_memory`, `disassemble`, `step`, `step_over`, `continue`,
 `write_register`, `write_memory`, `breakpoint_list`, `breakpoint_add`,
 `breakpoint_delete`; and the run-class `break`, `send_keys`, `type_text`, `mouse`,
-`read_screen`, `screen_hash`. The remaining tools are already classified so mismatches are
-reported correctly, but their handlers land in later slices.)
+`read_screen`, `screen_hash`, `take_screenshot`. The remaining tools are already classified
+so mismatches are reported correctly, but their handlers land in later slices.)
 
 ## Mental model
 
@@ -224,7 +225,7 @@ The input→screen loop is **`continue` → inject → wait → `read_screen`** 
 also run-class, so read while running — no need to `break`).
 
 ### Reading the screen
-Two **run**-class tools report the guest display while it free-runs (`continue` first if
+Three **run**-class tools report the guest display while it free-runs (`continue` first if
 parked — they return the `-32001` mismatch while parked). They read the live frame, so they
 pair directly with input injection (no `break` needed).
 
@@ -233,13 +234,22 @@ pair directly with input injection (no `break` needed).
   `cols` chars; each cell is rendered as printable ASCII (`0x20`–`0x7e`) or `.` (so lines are
   always valid UTF-8 and token-cheap — attributes and code-page glyphs are dropped). In a
   graphics mode it returns `{is_text: false, cols: 0, rows: 0, text: []}` — use
-  `take_screenshot` (Slice 10) for pixels.
+  `take_screenshot` for pixels.
 - **`screen_hash`** returns a cheap change-detection fingerprint
   `{mode, is_text, cols, rows, hash}` where `hash` is a `0x`-prefixed 16-hex FNV-1a value. It
   hashes the char+attribute cells in text modes (so it tracks exactly what `read_screen`
   shows) and the source dimensions + a bounded scan of video memory in graphics modes. Same
   screen → same hash; poll it to wait for the screen to settle or to detect a change without
   pulling the whole grid each time.
+- **`take_screenshot`** (also **run**-class) captures the full-fidelity frame as a PNG and
+  returns `{path, format: "png", width, height, bytes, mode, is_text}` — a path to a
+  ready-to-read file, never raw pixels. It is mode-agnostic (text screens are rasterized too),
+  but it is the way to see a **graphics** mode that `read_screen` can't render as text. The
+  capture is asynchronous under the hood (the PNG lands on the next rendered frame), so the
+  guest must be free-running and the call blocks briefly until the file is written; the
+  returned `path` is absolute and the file already exists when the reply arrives. Each call
+  writes a new, distinctly-named PNG into the capture directory. Use `width`/`height` (read
+  from the PNG itself) for the true output dimensions.
 
 ### Typical reverse-engineering loop
 _TODO: load target → break at entry → step → inspect → map behavior → record findings._

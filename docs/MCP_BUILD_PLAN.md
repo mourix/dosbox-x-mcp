@@ -391,6 +391,28 @@ metadata** (never raw pixels).
 **Tests:** integration — switch to a graphics mode, screenshot, assert valid non-empty PNG + correct dims.
 **DoD:** `mcp-check.sh` green.
 
+**Outcome (resolved):** ✅ Shipped. Same reader/formatter split as the other run-class slices, and
+**no core edit** — the new bridge `src/mcp/mcp_screenshot.cpp` reuses the exact path Slice 1 proved
+headless (`CaptureState |= CAPTURE_IMAGE` → the next rendered frame flushes a PNG via
+`RENDER_EndUpdate` → `CAPTURE_AddImage`) plus the file-scope `capturedir`, `CurMode`, and `render.src`,
+so the core-edit manifest is unchanged. The capture is inherently **asynchronous** (the PNG lands a frame
+*after* the handler returns), and handlers must stay non-blocking, so the bridge runs a tiny per-frame
+state machine: the first service call snapshots the capture dir, records the source mode, arms the capture
+and a ~4 s deadline (under the 5 s client timeout); later calls watch for the PNG that appeared since the
+snapshot, then read its **IHDR dims + file size** (falling back to `render.src` dims) and report it. While
+pending the dispatcher returns the new **`defer_sentinel()`** and the server's `drain` **re-queues** the
+request to retry next frame (a small isolated change to `mcp_server.cpp`, holding deferred requests aside
+so they don't spin within a drain) — so to the client it is a single blocking call that returns a
+ready-to-read absolute `path` + `{format:"png", width, height, bytes, mode, is_text}`. The tool is
+mode-agnostic (a text screen is still rasterized to a real PNG); it is run-class (already in the Slice 2
+classify table) and reached only when `STATE_RUNNING`. Unit tests: `tests/mcp_protocol_tests.cpp`
+(`Mcp.FormatScreenshot`, `Mcp.FormatScreenshotWithinCeiling`, `Mcp.DeferSentinelIsNotValidJson`,
+`Mcp.ScreenshotClassification`) cover the JSON shape, the payload bound, the non-JSON defer marker, and
+classification. Integration: `scripts/mcp_slice10_screenshot.py` boots headless **without** `-break-start`
+(the guest free-runs so frames render), asserts `take_screenshot` returns a PNG whose on-disk magic, size,
+and IHDR dims match the reported metadata, that a second call writes a distinct valid PNG (monotonic
+naming), and the parked mode-mismatch fast-reject; wired into `scripts/mcp-check.sh` (integration test #10).
+
 ## Slice 11 — Memory scanner: `scan_start` / `scan_filter` / `scan_results`
 **Goal:** "cheat-engine" progressive search for variables.
 **Changes:** wrap MEMFIND/MEMS (single global `MEMFINDInstance`): start snapshots a range; filter applies

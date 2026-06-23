@@ -1111,4 +1111,50 @@ TEST(Mcp, ScreenClassification)
     EXPECT_EQ(classify("screen_hash"), CLS_RUN);
 }
 
+/* ---- take_screenshot (Slice 10) ------------------------------------------ */
+
+TEST(Mcp, FormatScreenshot)
+{
+    ScreenshotResult s;
+    s.path    = "/tmp/caps/dosbox_000.png";
+    s.width   = 640;
+    s.height  = 400;
+    s.bytes   = 12345;
+    s.mode    = 0x13;
+    s.is_text = false;
+    EXPECT_EQ(format_screenshot(s).serialize(),
+              "{\"path\":\"/tmp/caps/dosbox_000.png\",\"format\":\"png\","
+              "\"width\":640,\"height\":400,\"bytes\":12345,\"mode\":19,"
+              "\"is_text\":false}");
+}
+
+TEST(Mcp, FormatScreenshotWithinCeiling)
+{
+    /* Even a pathological path stays well under the 64 KiB ceiling. */
+    ScreenshotResult s;
+    s.path    = std::string(40000, 'a');
+    s.width   = 320;
+    s.height  = 200;
+    s.bytes   = 9001;
+    s.mode    = 3;
+    s.is_text = true;
+    std::string body = make_result(Json::integer(1), format_screenshot(s));
+    EXPECT_EQ(enforce_max_payload(Json::integer(1), body), body);
+    EXPECT_LE(body.size(), MCP_MAX_PAYLOAD);
+}
+
+TEST(Mcp, DeferSentinelIsNotValidJson)
+{
+    /* The server compares replies against this marker; it must never collide
+     * with a real response (which always begins with '{'). */
+    const std::string &s = defer_sentinel();
+    ASSERT_FALSE(s.empty());
+    EXPECT_NE(s[0], '{');
+}
+
+TEST(Mcp, ScreenshotClassification)
+{
+    EXPECT_EQ(classify("take_screenshot"), CLS_RUN);
+}
+
 } // namespace

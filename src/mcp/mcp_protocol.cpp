@@ -823,6 +823,52 @@ Json format_mouse(const MouseRequest &req) {
     return r;
 }
 
+/* ---- screen (Slice 9) ---------------------------------------------------- */
+
+uint64_t fnv1a64(const uint8_t *data, size_t len) {
+    uint64_t h = 14695981039346656037ULL; /* FNV offset basis */
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint64_t)data[i];
+        h *= 1099511628211ULL;           /* FNV prime */
+    }
+    return h;
+}
+
+Json format_screen(const ScreenSnapshot &out) {
+    Json r = Json::object();
+    r.set("mode", Json::integer((long long)out.mode));
+    r.set("is_text", Json::boolean(out.is_text));
+    r.set("cols", Json::integer((long long)out.cols));
+    r.set("rows", Json::integer((long long)out.rows));
+    Json lines = Json::array();
+    if (out.is_text && out.cols > 0) {
+        for (int row = 0; row < out.rows; row++) {
+            std::string line;
+            line.reserve((size_t)out.cols);
+            for (int col = 0; col < out.cols; col++) {
+                size_t idx = (size_t)row * (size_t)out.cols + (size_t)col;
+                uint8_t b = idx < out.chars.size() ? out.chars[idx] : 0x20;
+                line.push_back((b >= 0x20 && b <= 0x7e) ? (char)b : '.');
+            }
+            lines.push(Json::str(line));
+        }
+    }
+    r.set("text", lines);
+    return r;
+}
+
+Json format_screen_hash(const ScreenHash &out) {
+    Json r = Json::object();
+    r.set("mode", Json::integer((long long)out.mode));
+    r.set("is_text", Json::boolean(out.is_text));
+    r.set("cols", Json::integer((long long)out.cols));
+    r.set("rows", Json::integer((long long)out.rows));
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "0x%016llx", (unsigned long long)out.hash);
+    r.set("hash", Json::str(buf));
+    return r;
+}
+
 std::string dispatch(const std::string &method, const Json &params,
                      const Json &id, ExecState state) {
     (void)params;
@@ -968,6 +1014,19 @@ std::string dispatch(const std::string &method, const Json &params,
             return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
         mouse_action(req);
         return enforce_max_payload(id, make_result(id, format_mouse(req)));
+    }
+
+    if (method == "read_screen") {
+        /* Run-class: mode_matches guaranteed STATE_RUNNING above. The screen is
+         * read at the frame tick, reflecting what the guest is displaying. */
+        ScreenSnapshot out;
+        read_screen(out);
+        return enforce_max_payload(id, make_result(id, format_screen(out)));
+    }
+    if (method == "screen_hash") {
+        ScreenHash out;
+        screen_hash(out);
+        return enforce_max_payload(id, make_result(id, format_screen_hash(out)));
     }
 
     /* Known method whose handler arrives in a later slice. */

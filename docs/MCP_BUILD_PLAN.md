@@ -359,6 +359,31 @@ framebuffer bytes in graphics modes (change-detection even headless / graphics).
 is stable otherwise.
 **DoD:** `mcp-check.sh` green.
 
+**Outcome (resolved):** ✅ Shipped. Same reader/formatter split as the other state slices; both
+tools are run-class (serviced at the `GFX_Events` frame tick while the guest free-runs — the screen
+is read live, not via a parked memory peek). The new bridge `src/mcp/mcp_screen.cpp` reuses existing
+globals/APIs, so **no core edits** — the core-edit manifest is unchanged. `read_screen` reads the text
+grid via the int10 `ReadCharAttr` primitive (the same one INT 10h AH=08h uses) for each cell, with the
+grid dimensions taken from the BIOS data area (`BIOSMEM_NB_COLS`/`NB_ROWS`, mode-block fallback,
+clamped to `MCP_SCREEN_MAX_COLS`×`ROWS` = 255×100); in graphics modes it returns `is_text:false` and an
+empty grid (use `take_screenshot`, Slice 10). `screen_hash` is an FNV-1a 64-bit fingerprint — over the
+visible char+attribute cells in text modes (so it tracks exactly what `read_screen` shows), and over
+`render.src` dimensions + a bounded (`MCP_SCREENHASH_SCAN_MAX` = 256 KiB) scan of `vga.mem.linear` in
+graphics modes — rendered as a `0x`-prefixed 16-hex string so no precision is lost across JSON's double.
+The pure layer (`mcp_protocol.cpp`) owns the `fnv1a64` primitive and the formatters: `format_screen`
+sanitizes each cell to printable ASCII (`0x20..0x7e`) or `.` so every line is valid UTF-8 and
+token-cheap, and a full 132×60 grid is asserted under the 64 KiB ceiling. The one isolated build touch
+is `-I$(top_srcdir)/src/ints` added to `src/mcp/Makefile.am` so the bridge can include `int10.h`
+(`CurMode`/`VideoModeBlock`/`M_TEXT`/`BIOSMEM_*`) — MCP-local, not a core edit. Unit tests:
+`tests/mcp_protocol_tests.cpp` (`Mcp.Fnv1a64KnownVectors`, `Mcp.FormatScreen*`,
+`Mcp.FormatScreenHashRendersHexString`, `Mcp.ScreenClassification`) cover the hash against canonical
+FNV-1a vectors, grid sanitization/shaping, the non-text empty grid, the full-grid payload bound, hex
+rendering, and classification. Integration: `scripts/mcp_slice9_screen.py` boots headless **without**
+`-break-start` (early boot shows a graphics splash — the test waits through it), asserts a well-shaped
+80×25 text grid with the `Z:\` prompt, the parked mode-mismatch fast-reject for both tools, and that
+`screen_hash` is stable on an unchanging screen, changes after typing onto the prompt, and is
+deterministic for a given screen; wired into `scripts/mcp-check.sh` (integration test #9).
+
 ## Slice 10 — `take_screenshot` (graphics, on-demand)
 **Goal:** full-fidelity graphics capture when asked.
 **Changes:** promote the Slice 1 verification into a tool: trigger capture, return a **PNG path +

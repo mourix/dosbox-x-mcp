@@ -1037,4 +1037,78 @@ TEST(Mcp, InputClassification)
     EXPECT_FALSE(mode_matches(CLS_RUN, STATE_PARKED));
 }
 
+// -- screen (Slice 9) ------------------------------------------------------
+
+TEST(Mcp, Fnv1a64KnownVectors)
+{
+    // Empty input hashes to the FNV-1a 64-bit offset basis.
+    EXPECT_EQ(fnv1a64(nullptr, 0), 14695981039346656037ULL);
+    // Canonical "a" / "foobar" FNV-1a 64-bit reference values.
+    const uint8_t a[]      = { 'a' };
+    const uint8_t foobar[] = { 'f','o','o','b','a','r' };
+    EXPECT_EQ(fnv1a64(a, sizeof(a)),           0xaf63dc4c8601ec8cULL);
+    EXPECT_EQ(fnv1a64(foobar, sizeof(foobar)), 0x85944171f73967e8ULL);
+}
+
+TEST(Mcp, FormatScreenTextGridSanitizesAndShapesRows)
+{
+    ScreenSnapshot s;
+    s.is_text = true;
+    s.mode = 3;
+    s.cols = 4;
+    s.rows = 2;
+    // Row 0: "Z:\>" ; row 1 mixes a NUL, a high byte, and a tab -> all '.'.
+    const uint8_t cells[] = {
+        'Z', ':', '\\', '>',
+        0x00, 0xB0, '\t', 'X'
+    };
+    s.chars.assign(cells, cells + sizeof(cells));
+    EXPECT_EQ(format_screen(s).serialize(),
+              "{\"mode\":3,\"is_text\":true,\"cols\":4,\"rows\":2,"
+              "\"text\":[\"Z:\\\\>\",\"...X\"]}");
+}
+
+TEST(Mcp, FormatScreenNonTextHasEmptyGrid)
+{
+    ScreenSnapshot s;
+    s.is_text = false;
+    s.mode = 19;
+    s.cols = 0;
+    s.rows = 0;
+    EXPECT_EQ(format_screen(s).serialize(),
+              "{\"mode\":19,\"is_text\":false,\"cols\":0,\"rows\":0,\"text\":[]}");
+}
+
+TEST(Mcp, FormatScreenFullGridWithinCeiling)
+{
+    // A 132x60 grid is the largest a text mode reaches; assert it stays under
+    // the 64 KiB ceiling so dispatch never has to swap in a TOO_LARGE error.
+    ScreenSnapshot s;
+    s.is_text = true;
+    s.mode = 3;
+    s.cols = 132;
+    s.rows = 60;
+    s.chars.assign((size_t)s.cols * s.rows, (uint8_t)'#');
+    EXPECT_LT(format_screen(s).serialize().size(), MCP_MAX_PAYLOAD);
+}
+
+TEST(Mcp, FormatScreenHashRendersHexString)
+{
+    ScreenHash h;
+    h.is_text = true;
+    h.mode = 3;
+    h.cols = 80;
+    h.rows = 25;
+    h.hash = 0x0123456789abcdefULL;
+    EXPECT_EQ(format_screen_hash(h).serialize(),
+              "{\"mode\":3,\"is_text\":true,\"cols\":80,\"rows\":25,"
+              "\"hash\":\"0x0123456789abcdef\"}");
+}
+
+TEST(Mcp, ScreenClassification)
+{
+    EXPECT_EQ(classify("read_screen"), CLS_RUN);
+    EXPECT_EQ(classify("screen_hash"), CLS_RUN);
+}
+
 } // namespace

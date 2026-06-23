@@ -1,4 +1,4 @@
-AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/src/mcp
+AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/src/mcp -I$(top_srcdir)/src/ints
 
 noinst_LIBRARIES = libmcp.a
 libmcp_a_SOURCES = \
@@ -10,4 +10,5 @@ libmcp_a_SOURCES = \
 	mcp_execution.cpp \
 	mcp_breakpoints.cpp \
 	mcp_input.cpp \
+	mcp_screen.cpp \
 	mcp_server.cpp mcp_server.h

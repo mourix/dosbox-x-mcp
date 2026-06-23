@@ -432,6 +432,68 @@ void send_keys(const std::vector<KeyEvent> &events);
 void type_text_enqueue(const std::vector<KeyEvent> &events);
 void mouse_action(const MouseRequest &req);
 
+/* ---- screen (Slice 9) ----------------------------------------------------
+ *
+ * read_screen / screen_hash. Both run-class (serviced at the GFX_Events frame
+ * tick — see classify): the visible screen is read while the guest runs. Same
+ * reader/formatter split as the other slices: the reading of BIOS/video state
+ * lives in the bridge mcp_screen.cpp; the JSON formatting and the hash primitive
+ * are pure here (unit-tested with no boot). No core edits — the bridge reuses
+ * existing globals/APIs (CurMode, ReadCharAttr, real_read*, vga.mem, render),
+ * like the Slice 3/4/7/8 bridges.
+ *
+ * read_screen returns the text grid (int10 ReadCharAttr) when CurMode is a text
+ * mode; in graphics modes it reports is_text=false and an empty grid (use
+ * take_screenshot, Slice 10). screen_hash is a cheap change-detection
+ * fingerprint: the char+attribute cells in text modes, render.src dimensions
+ * plus a bounded scan of guest video memory in graphics modes — so it changes
+ * when the screen changes and is stable otherwise, even headless. */
+
+/* Defensive grid caps (a text mode should be ≤ 132×60; enforce_max_payload is
+ * the hard ceiling). */
+static const int    MCP_SCREEN_MAX_COLS = 255;
+static const int    MCP_SCREEN_MAX_ROWS = 100;
+/* Bound the graphics-mode video-memory scan that feeds the fingerprint. */
+static const size_t MCP_SCREENHASH_SCAN_MAX = 256 * 1024;
+
+/* A plain-data snapshot of the text screen grid (read_screen). `chars` holds
+ * cols*rows code-page bytes, row-major. For non-text modes is_text is false and
+ * cols/rows/chars are empty. */
+struct ScreenSnapshot {
+    bool                 is_text;
+    int                  mode;   /* CurMode->mode */
+    int                  cols;
+    int                  rows;
+    std::vector<uint8_t> chars;
+};
+
+/* Bridge (mcp_screen.cpp): read the text grid. Touches BIOS data area + video
+ * memory, so it runs on the emulator thread (the frame tick). */
+void read_screen(ScreenSnapshot &out);
+
+/* Pure: format the grid as bounded JSON. Each cell byte is rendered as printable
+ * ASCII (0x20..0x7e) or '.', so every line is valid UTF-8 and token-cheap. */
+Json format_screen(const ScreenSnapshot &out);
+
+/* A cheap screen fingerprint for change detection (screen_hash). */
+struct ScreenHash {
+    bool     is_text;
+    int      mode;
+    int      cols;          /* text: grid cols; graphics: render.src.width  */
+    int      rows;          /* text: grid rows; graphics: render.src.height */
+    uint64_t hash;
+};
+
+/* Pure: FNV-1a 64-bit over a byte buffer — the fingerprint primitive. */
+uint64_t fnv1a64(const uint8_t *data, size_t len);
+
+/* Bridge (mcp_screen.cpp): compute the fingerprint on the emulator thread. */
+void screen_hash(ScreenHash &out);
+
+/* Pure: format a fingerprint as compact JSON (hash as a 0x-prefixed 16-hex
+ * string so no precision is lost crossing JSON's double). */
+Json format_screen_hash(const ScreenHash &out);
+
 /* Pure dispatch: given a parsed request and the current execution state, return
  * the full response line. Handles unknown methods, mode-mismatch fast-reject,
  * and the ping / server_info handlers. State-touching handlers (later slices)

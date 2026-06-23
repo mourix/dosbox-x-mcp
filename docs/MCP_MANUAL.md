@@ -9,8 +9,9 @@ themselves (the single source of truth) — this manual does not duplicate schem
 > `ping` / `server_info`. State-touching tools landed so far: `read_registers` (Slice 3),
 > `read_memory` + `disassemble` (Slice 4), execution control `step` / `step_over` /
 > `continue` / `break` (Slice 5), breakpoints `breakpoint_list` / `breakpoint_add` /
-> `breakpoint_delete` (Slice 6), writes `write_register` / `write_memory` (Slice 7), and
-> input injection `send_keys` / `type_text` / `mouse` (Slice 8).
+> `breakpoint_delete` (Slice 6), writes `write_register` / `write_memory` (Slice 7),
+> input injection `send_keys` / `type_text` / `mouse` (Slice 8), and screen reads
+> `read_screen` / `screen_hash` (Slice 9).
 > Remaining tools land in later slices. Keep workflows here in sync with the implemented
 > tools; update on every feature.
 
@@ -34,8 +35,8 @@ Slice 1's integration test (`scripts/mcp_slice1_screenshot.py`) verifies that th
 capture path produces a PNG under the dummy video driver. It uses a temporary
 self-test hook gated behind the `MCP_SELFTEST_SCREENSHOT` env var (with optional
 `MCP_SELFTEST_FRAMES`): when set, the emulator requests one screenshot after the guest
-boots. This is scaffolding to de-risk the screen pillar — the real screen tools
-(`screen_hash`, `read_screen`, `take_screenshot`) arrive in Slices 9–10.
+boots. This is scaffolding to de-risk the screen pillar — the real screen reads
+(`read_screen` / `screen_hash`) landed in Slice 9; `take_screenshot` arrives in Slice 10.
 
 ## Connecting to the server (transport)
 
@@ -76,9 +77,9 @@ mismatch error telling you the current state; switch with `break` / `continue` f
 (Implemented so far: the `any`-class `ping` / `server_info`; the parked-class
 `read_registers`, `read_memory`, `disassemble`, `step`, `step_over`, `continue`,
 `write_register`, `write_memory`, `breakpoint_list`, `breakpoint_add`,
-`breakpoint_delete`; and the run-class `break`, `send_keys`, `type_text`, `mouse`. The
-remaining tools are already classified so mismatches are reported correctly, but their
-handlers land in later slices.)
+`breakpoint_delete`; and the run-class `break`, `send_keys`, `type_text`, `mouse`,
+`read_screen`, `screen_hash`. The remaining tools are already classified so mismatches are
+reported correctly, but their handlers land in later slices.)
 
 ## Mental model
 
@@ -219,7 +220,26 @@ video memory at `B800:0` with `read_memory`).
   (`amount`, signed). Replies `{action, …, injected: true}`. (Mouse events reach the guest
   only when it has a mouse driver/handler installed.)
 
-The input→screen loop is **`continue` → inject → wait → `break` → read screen/memory**.
+The input→screen loop is **`continue` → inject → wait → `read_screen`** (screen tools are
+also run-class, so read while running — no need to `break`).
+
+### Reading the screen
+Two **run**-class tools report the guest display while it free-runs (`continue` first if
+parked — they return the `-32001` mismatch while parked). They read the live frame, so they
+pair directly with input injection (no `break` needed).
+
+- **`read_screen`** returns the text grid (no params). In a text mode the reply is
+  `{mode, is_text: true, cols, rows, text: [...]}` where `text` has one string per row, each
+  `cols` chars; each cell is rendered as printable ASCII (`0x20`–`0x7e`) or `.` (so lines are
+  always valid UTF-8 and token-cheap — attributes and code-page glyphs are dropped). In a
+  graphics mode it returns `{is_text: false, cols: 0, rows: 0, text: []}` — use
+  `take_screenshot` (Slice 10) for pixels.
+- **`screen_hash`** returns a cheap change-detection fingerprint
+  `{mode, is_text, cols, rows, hash}` where `hash` is a `0x`-prefixed 16-hex FNV-1a value. It
+  hashes the char+attribute cells in text modes (so it tracks exactly what `read_screen`
+  shows) and the source dimensions + a bounded scan of video memory in graphics modes. Same
+  screen → same hash; poll it to wait for the screen to settle or to detect a change without
+  pulling the whole grid each time.
 
 ### Typical reverse-engineering loop
 _TODO: load target → break at entry → step → inspect → map behavior → record findings._

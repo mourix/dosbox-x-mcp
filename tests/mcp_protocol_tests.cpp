@@ -861,4 +861,180 @@ TEST(Mcp, WriteClassification)
     EXPECT_TRUE(mode_matches(CLS_PARKED, STATE_PARKED));
 }
 
+// -- input injection (Slice 8) ---------------------------------------------
+
+TEST(Mcp, KbdKeyFromName)
+{
+    int k1, k2;
+    ASSERT_TRUE(kbd_key_from_name("a", k1));
+    // case-insensitive lookup maps to the same key.
+    ASSERT_TRUE(kbd_key_from_name("A", k2));
+    EXPECT_EQ(k1, k2);
+    int kr, ke;
+    ASSERT_TRUE(kbd_key_from_name("return", kr));
+    ASSERT_TRUE(kbd_key_from_name("enter", ke));
+    EXPECT_EQ(kr, ke);                 // alias
+    int kc, kl;
+    ASSERT_TRUE(kbd_key_from_name("ctrl", kc));
+    ASSERT_TRUE(kbd_key_from_name("leftctrl", kl));
+    EXPECT_EQ(kc, kl);                 // alias
+    int dummy;
+    EXPECT_FALSE(kbd_key_from_name("nosuchkey", dummy));
+}
+
+TEST(Mcp, AsciiToKey)
+{
+    int k; bool shift;
+    ASSERT_TRUE(ascii_to_key('a', k, shift)); EXPECT_FALSE(shift);
+    int ka = k;
+    ASSERT_TRUE(ascii_to_key('A', k, shift)); EXPECT_TRUE(shift);
+    EXPECT_EQ(k, ka);                 // 'A' is shift + same key as 'a'
+    ASSERT_TRUE(ascii_to_key('1', k, shift)); EXPECT_FALSE(shift);
+    int k1 = k;
+    ASSERT_TRUE(ascii_to_key('!', k, shift)); EXPECT_TRUE(shift);
+    EXPECT_EQ(k, k1);                 // '!' is shift + '1'
+    ASSERT_TRUE(ascii_to_key(' ', k, shift)); EXPECT_FALSE(shift);
+    // a control char with no key fails.
+    EXPECT_FALSE(ascii_to_key('\x01', k, shift));
+}
+
+TEST(Mcp, ParseSendKeysTapsAndChords)
+{
+    std::vector<KeyEvent> ev;
+    std::string err;
+    // string entries expand to press+release taps.
+    ASSERT_TRUE(parse_send_keys_request(
+        parse_params("{\"keys\":[\"d\",\"i\",\"r\"]}"), ev, err)) << err;
+    ASSERT_EQ(ev.size(), 6u);
+    EXPECT_TRUE(ev[0].down);
+    EXPECT_FALSE(ev[1].down);
+    EXPECT_EQ(ev[0].kbd, ev[1].kbd);  // press then release of the same key
+
+    // object entries give explicit transitions (held chord: ctrl down, c, ctrl up).
+    ASSERT_TRUE(parse_send_keys_request(
+        parse_params("{\"keys\":["
+                     "{\"key\":\"leftctrl\",\"down\":true},"
+                     "{\"key\":\"c\",\"down\":true},"
+                     "{\"key\":\"c\",\"down\":false},"
+                     "{\"key\":\"leftctrl\",\"down\":false}]}"),
+        ev, err)) << err;
+    ASSERT_EQ(ev.size(), 4u);
+    EXPECT_TRUE(ev[0].down);
+    EXPECT_FALSE(ev[3].down);
+}
+
+TEST(Mcp, ParseSendKeysRejectsBadInput)
+{
+    std::vector<KeyEvent> ev;
+    std::string err;
+    EXPECT_FALSE(parse_send_keys_request(parse_params("{}"), ev, err));
+    EXPECT_FALSE(parse_send_keys_request(parse_params("{\"keys\":[]}"), ev, err));
+    EXPECT_FALSE(parse_send_keys_request(parse_params("{\"keys\":[\"zz\"]}"), ev, err));
+    EXPECT_FALSE(parse_send_keys_request(parse_params("{\"keys\":[123]}"), ev, err));
+    EXPECT_FALSE(parse_send_keys_request(parse_params("{\"keys\":[{\"down\":true}]}"), ev, err));
+
+    // over the transition cap (each tap is 2 transitions) is rejected.
+    Json p = Json::object();
+    Json keys = Json::array();
+    for (size_t i = 0; i < MCP_KEYS_MAX; i++) keys.push(Json::str("a"));
+    p.set("keys", keys);
+    EXPECT_FALSE(parse_send_keys_request(p, ev, err));
+}
+
+TEST(Mcp, ParseTypeTextDecodesAndSkips)
+{
+    std::vector<KeyEvent> ev;
+    size_t chars, skipped;
+    std::string err;
+    // "Hi" -> H is shifted (4 transitions), i is plain (2) = 6.
+    ASSERT_TRUE(parse_type_text_request(
+        parse_params("{\"text\":\"Hi\"}"), ev, chars, skipped, err)) << err;
+    EXPECT_EQ(chars, 2u);
+    EXPECT_EQ(skipped, 0u);
+    EXPECT_EQ(ev.size(), 6u);
+    EXPECT_TRUE(ev.front().down);     // leftshift down first
+    EXPECT_FALSE(ev.back().down);     // ... 'i' release last
+
+    // an undecodable char is skipped and counted; decodable ones still emitted.
+    ASSERT_TRUE(parse_type_text_request(
+        parse_params("{\"text\":\"a\\u0001b\"}"), ev, chars, skipped, err)) << err;
+    EXPECT_EQ(chars, 2u);
+    EXPECT_EQ(skipped, 1u);
+    EXPECT_EQ(ev.size(), 4u);         // 2 plain chars * 2 transitions
+}
+
+TEST(Mcp, ParseTypeTextRejectsBadInput)
+{
+    std::vector<KeyEvent> ev;
+    size_t chars, skipped;
+    std::string err;
+    EXPECT_FALSE(parse_type_text_request(parse_params("{}"), ev, chars, skipped, err));
+    EXPECT_FALSE(parse_type_text_request(parse_params("{\"text\":123}"), ev, chars, skipped, err));
+    // over the length cap.
+    std::string big = "{\"text\":\"";
+    for (size_t i = 0; i < MCP_TYPE_MAX + 1; i++) big += "a";
+    big += "\"}";
+    EXPECT_FALSE(parse_type_text_request(parse_params(big.c_str()), ev, chars, skipped, err));
+}
+
+TEST(Mcp, ParseMouseVariants)
+{
+    MouseRequest req;
+    std::string err;
+    ASSERT_TRUE(parse_mouse_request(parse_params("{\"action\":\"move\",\"dx\":-5,\"dy\":3}"), req, err)) << err;
+    EXPECT_EQ(req.action, MOUSE_MOVE);
+    EXPECT_EQ(req.dx, -5);
+    EXPECT_EQ(req.dy, 3);
+
+    ASSERT_TRUE(parse_mouse_request(parse_params("{\"action\":\"click\",\"button\":1}"), req, err)) << err;
+    EXPECT_EQ(req.action, MOUSE_CLICK);
+    EXPECT_EQ(req.button, 1);
+
+    ASSERT_TRUE(parse_mouse_request(parse_params("{\"action\":\"down\"}"), req, err)) << err;
+    EXPECT_EQ(req.action, MOUSE_DOWN);
+    EXPECT_EQ(req.button, 0);          // default left
+
+    ASSERT_TRUE(parse_mouse_request(parse_params("{\"action\":\"wheel\",\"amount\":-2}"), req, err)) << err;
+    EXPECT_EQ(req.action, MOUSE_WHEEL);
+    EXPECT_EQ(req.wheel, -2);
+}
+
+TEST(Mcp, ParseMouseRejectsBadInput)
+{
+    MouseRequest req;
+    std::string err;
+    EXPECT_FALSE(parse_mouse_request(parse_params("{}"), req, err));
+    EXPECT_FALSE(parse_mouse_request(parse_params("{\"action\":\"spin\"}"), req, err));
+    EXPECT_FALSE(parse_mouse_request(parse_params("{\"action\":\"click\",\"button\":5}"), req, err));
+    EXPECT_FALSE(parse_mouse_request(parse_params("{\"action\":\"wheel\"}"), req, err));
+}
+
+TEST(Mcp, FormatInputResults)
+{
+    EXPECT_EQ(format_send_keys(6).serialize(),
+              "{\"injected\":true,\"transitions\":6}");
+    EXPECT_EQ(format_type_text(2, 1).serialize(),
+              "{\"queued\":true,\"chars\":2,\"skipped\":1}");
+
+    MouseRequest m;
+    m.action = MOUSE_MOVE; m.dx = -5; m.dy = 3; m.button = 0; m.wheel = 0;
+    EXPECT_EQ(format_mouse(m).serialize(),
+              "{\"action\":\"move\",\"dx\":-5,\"dy\":3,\"injected\":true}");
+    m.action = MOUSE_CLICK; m.button = 1;
+    EXPECT_EQ(format_mouse(m).serialize(),
+              "{\"action\":\"click\",\"button\":1,\"injected\":true}");
+    m.action = MOUSE_WHEEL; m.wheel = -2;
+    EXPECT_EQ(format_mouse(m).serialize(),
+              "{\"action\":\"wheel\",\"amount\":-2,\"injected\":true}");
+}
+
+TEST(Mcp, InputClassification)
+{
+    EXPECT_EQ(classify("send_keys"), CLS_RUN);
+    EXPECT_EQ(classify("type_text"), CLS_RUN);
+    EXPECT_EQ(classify("mouse"), CLS_RUN);
+    EXPECT_TRUE(mode_matches(CLS_RUN, STATE_RUNNING));
+    EXPECT_FALSE(mode_matches(CLS_RUN, STATE_PARKED));
+}
+
 } // namespace

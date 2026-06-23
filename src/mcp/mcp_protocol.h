@@ -349,6 +349,89 @@ Json format_mem_write(const MemWriteRequest &req, const MemWriteResult &out);
  * emulator thread while parked. */
 void write_memory(const MemWriteRequest &req, MemWriteResult &out);
 
+/* ---- input injection (Slice 8) ------------------------------------------
+ *
+ * send_keys / type_text / mouse. All run-class (serviced at the GFX_Events frame
+ * tick while the guest free-runs). Same reader/formatter split as the other
+ * slices: param parsing + JSON formatting are pure (here / mcp_protocol.cpp,
+ * unit-tested with no boot); the actual injection lives in the bridge
+ * mcp_input.cpp. No core edits: the bridge reuses existing public APIs
+ * (KEYBOARD_AddKey, Mouse_*), like the Slice 3/4/7 bridges.
+ *
+ * Deviations from the build-plan sketch, with justification:
+ *  - type_text does NOT use MAPPER_AutoType. That helper spawns a background
+ *    std::thread (the mapper's Typer) which mutates keyboard state OFF the
+ *    emulator thread — incompatible with this fork's single-threaded discipline
+ *    and dependent on the SDL mapper being initialized (fragile headless).
+ *    Instead the decoded key transitions are queued and fed a few per frame on
+ *    the emulator thread (MCP_InputFrameService), respecting the keyboard
+ *    controller buffer (KEYBOARD_BufferSpaceAvail) — single-threaded and paced.
+ *  - mouse uses the direct Mouse_* APIs rather than GFX_EventsMouseProcess,
+ *    which is window/clip/SDL-event dependent (Win32-centric) and unsuitable
+ *    headless.
+ */
+
+/* Input-side caps (bound the work a single input call enqueues). */
+static const size_t MCP_KEYS_MAX = 64;   /* send_keys transitions per call    */
+static const size_t MCP_TYPE_MAX = 256;  /* type_text characters per call      */
+
+/* One keyboard key transition. `kbd` is the KBD_KEYS integer value (the bridge
+ * casts it back to the core enum); `down` true = press, false = release. Using
+ * ints keeps the public header free of the core keyboard.h enum. */
+struct KeyEvent { int kbd; bool down; };
+
+/* Pure: map a key name ("a"/"enter"/"leftctrl"/"f1"/"space"/...) to its KBD_KEYS
+ * integer; accepts a few aliases (return/del/ctrl/...). Returns false on an
+ * unknown name. Defined in mcp_protocol.cpp (includes keyboard.h for the enum). */
+bool kbd_key_from_name(const std::string &name, int &kbd);
+
+/* Pure: map a printable ASCII char to a US-layout key + whether shift is needed.
+ * Returns false for chars with no key. */
+bool ascii_to_key(char c, int &kbd, bool &shift);
+
+/* Pure: parse a send_keys request. `keys` is a non-empty array whose entries are
+ * either a string key name (expands to a press+release tap) or an object
+ * {key, down} for an explicit transition (so chords like ctrl+c are expressible).
+ * Total transitions are capped at MCP_KEYS_MAX. Returns false + err on a
+ * missing/invalid field or unknown key name. */
+bool parse_send_keys_request(const Json &params, std::vector<KeyEvent> &out, std::string &err);
+
+/* Pure: format the outcome of a send_keys call. */
+Json format_send_keys(size_t transitions);
+
+/* Pure: parse a type_text request. Required `text` string, capped at
+ * MCP_TYPE_MAX chars; decoded to KeyEvents (leftshift bracketing for shifted
+ * chars). Undecodable chars are skipped and counted in `skipped`. */
+bool parse_type_text_request(const Json &params, std::vector<KeyEvent> &out,
+                             size_t &chars, size_t &skipped, std::string &err);
+
+/* Pure: format the outcome of a type_text call. */
+Json format_type_text(size_t chars, size_t skipped);
+
+/* Mouse: exactly one action per call. */
+enum MouseAction { MOUSE_MOVE, MOUSE_DOWN, MOUSE_UP, MOUSE_CLICK, MOUSE_WHEEL };
+struct MouseRequest {
+    MouseAction action;
+    int dx, dy;   /* MOUSE_MOVE: relative motion (pixels)         */
+    int button;   /* MOUSE_DOWN/UP/CLICK: 0=left 1=right 2=middle */
+    int wheel;    /* MOUSE_WHEEL: signed amount                   */
+};
+
+/* Pure: parse a mouse request (`action` ∈ move|down|up|click|wheel + its
+ * fields). Returns false + err on a missing/invalid field. */
+bool parse_mouse_request(const Json &params, MouseRequest &req, std::string &err);
+
+/* Pure: format the outcome of a mouse call. */
+Json format_mouse(const MouseRequest &req);
+
+/* Bridges (mcp_input.cpp): run on the emulator thread at the frame tick.
+ * send_keys applies the transitions immediately; type_text_enqueue appends them
+ * to the frame-paced queue (drained by MCP_InputFrameService); mouse_action
+ * drives the emulated mouse. */
+void send_keys(const std::vector<KeyEvent> &events);
+void type_text_enqueue(const std::vector<KeyEvent> &events);
+void mouse_action(const MouseRequest &req);
+
 /* Pure dispatch: given a parsed request and the current execution state, return
  * the full response line. Handles unknown methods, mode-mismatch fast-reject,
  * and the ping / server_info handlers. State-touching handlers (later slices)

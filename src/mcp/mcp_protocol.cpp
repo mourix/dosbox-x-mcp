@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "keyboard.h" /* KBD_KEYS enum (constants only, no emulator state) */
+
 /* Provided by the rest of the MCP module (mcp.cpp / mcp_server.cpp). Declared
  * here rather than included to keep this layer transport-agnostic. */
 const char *MCP_Version(void);
@@ -179,6 +181,22 @@ bool json_to_u32(const Json *v, uint32_t &out) {
         unsigned long val = std::strtoul(s.c_str(), &end, 0); /* 0 -> auto-base */
         if (end == s.c_str() || *end != '\0') return false;
         out = (uint32_t)val;
+        return true;
+    }
+    return false;
+}
+
+/* Like json_to_u32 but signed (for mouse deltas / wheel amounts). */
+bool json_to_i32(const Json *v, int &out) {
+    if (v == nullptr) return false;
+    if (v->isNumber()) { out = (int)v->asInt(); return true; }
+    if (v->isString()) {
+        const std::string &s = v->asString();
+        if (s.empty()) return false;
+        char *end = nullptr;
+        long val = std::strtol(s.c_str(), &end, 0);
+        if (end == s.c_str() || *end != '\0') return false;
+        out = (int)val;
         return true;
     }
     return false;
@@ -584,6 +602,227 @@ Json format_mem_write(const MemWriteRequest &req, const MemWriteResult &out) {
     return r;
 }
 
+// -- input injection (Slice 8) ---------------------------------------------
+
+namespace {
+
+/* Key-name -> KBD_KEYS table. Lower-cased lookup; a handful of aliases. Only the
+ * keys a remote driver realistically needs are listed (the full KBD_KEYS set has
+ * JP/KR/AX entries that are not useful here). */
+struct KeyName { const char *name; int kbd; };
+const KeyName kKeyNames[] = {
+    {"1",KBD_1},{"2",KBD_2},{"3",KBD_3},{"4",KBD_4},{"5",KBD_5},
+    {"6",KBD_6},{"7",KBD_7},{"8",KBD_8},{"9",KBD_9},{"0",KBD_0},
+    {"a",KBD_a},{"b",KBD_b},{"c",KBD_c},{"d",KBD_d},{"e",KBD_e},{"f",KBD_f},
+    {"g",KBD_g},{"h",KBD_h},{"i",KBD_i},{"j",KBD_j},{"k",KBD_k},{"l",KBD_l},
+    {"m",KBD_m},{"n",KBD_n},{"o",KBD_o},{"p",KBD_p},{"q",KBD_q},{"r",KBD_r},
+    {"s",KBD_s},{"t",KBD_t},{"u",KBD_u},{"v",KBD_v},{"w",KBD_w},{"x",KBD_x},
+    {"y",KBD_y},{"z",KBD_z},
+    {"f1",KBD_f1},{"f2",KBD_f2},{"f3",KBD_f3},{"f4",KBD_f4},{"f5",KBD_f5},
+    {"f6",KBD_f6},{"f7",KBD_f7},{"f8",KBD_f8},{"f9",KBD_f9},{"f10",KBD_f10},
+    {"f11",KBD_f11},{"f12",KBD_f12},
+    {"esc",KBD_esc},{"escape",KBD_esc},{"tab",KBD_tab},
+    {"backspace",KBD_backspace},{"bksp",KBD_backspace},
+    {"enter",KBD_enter},{"return",KBD_enter},{"space",KBD_space},
+    {"capslock",KBD_capslock},{"scrolllock",KBD_scrolllock},{"numlock",KBD_numlock},
+    {"leftalt",KBD_leftalt},{"lalt",KBD_leftalt},{"alt",KBD_leftalt},
+    {"rightalt",KBD_rightalt},{"ralt",KBD_rightalt},
+    {"leftctrl",KBD_leftctrl},{"lctrl",KBD_leftctrl},{"ctrl",KBD_leftctrl},
+    {"rightctrl",KBD_rightctrl},{"rctrl",KBD_rightctrl},
+    {"leftshift",KBD_leftshift},{"lshift",KBD_leftshift},{"shift",KBD_leftshift},
+    {"rightshift",KBD_rightshift},{"rshift",KBD_rightshift},
+    {"grave",KBD_grave},{"backtick",KBD_grave},{"minus",KBD_minus},
+    {"equals",KBD_equals},{"backslash",KBD_backslash},
+    {"leftbracket",KBD_leftbracket},{"rightbracket",KBD_rightbracket},
+    {"semicolon",KBD_semicolon},{"quote",KBD_quote},{"period",KBD_period},
+    {"comma",KBD_comma},{"slash",KBD_slash},
+    {"printscreen",KBD_printscreen},{"pause",KBD_pause},
+    {"insert",KBD_insert},{"home",KBD_home},{"pageup",KBD_pageup},
+    {"delete",KBD_delete},{"del",KBD_delete},{"end",KBD_end},{"pagedown",KBD_pagedown},
+    {"left",KBD_left},{"up",KBD_up},{"down",KBD_down},{"right",KBD_right},
+    {"kp0",KBD_kp0},{"kp1",KBD_kp1},{"kp2",KBD_kp2},{"kp3",KBD_kp3},{"kp4",KBD_kp4},
+    {"kp5",KBD_kp5},{"kp6",KBD_kp6},{"kp7",KBD_kp7},{"kp8",KBD_kp8},{"kp9",KBD_kp9},
+    {"kpdivide",KBD_kpdivide},{"kpmultiply",KBD_kpmultiply},{"kpminus",KBD_kpminus},
+    {"kpplus",KBD_kpplus},{"kpenter",KBD_kpenter},{"kpperiod",KBD_kpperiod},
+    {"lwindows",KBD_lwindows},{"rwindows",KBD_rwindows},{"menu",KBD_rwinmenu},
+};
+
+} // namespace
+
+bool kbd_key_from_name(const std::string &name, int &kbd) {
+    std::string s = name;
+    for (size_t i = 0; i < s.size(); i++) s[i] = (char)std::tolower((unsigned char)s[i]);
+    for (size_t i = 0; i < sizeof(kKeyNames)/sizeof(kKeyNames[0]); i++) {
+        if (s == kKeyNames[i].name) { kbd = kKeyNames[i].kbd; return true; }
+    }
+    return false;
+}
+
+bool ascii_to_key(char c, int &kbd, bool &shift) {
+    shift = false;
+    if (c >= 'a' && c <= 'z') { return kbd_key_from_name(std::string(1, c), kbd); }
+    if (c >= 'A' && c <= 'Z') { shift = true; return kbd_key_from_name(std::string(1, (char)(c - 'A' + 'a')), kbd); }
+    if (c >= '0' && c <= '9') { return kbd_key_from_name(std::string(1, c), kbd); }
+    switch (c) {
+        case ' ':  kbd = KBD_space; return true;
+        case '\n': case '\r': kbd = KBD_enter; return true;
+        case '\t': kbd = KBD_tab; return true;
+        case '\b': kbd = KBD_backspace; return true;
+        /* unshifted punctuation */
+        case '-':  kbd = KBD_minus; return true;
+        case '=':  kbd = KBD_equals; return true;
+        case '[':  kbd = KBD_leftbracket; return true;
+        case ']':  kbd = KBD_rightbracket; return true;
+        case ';':  kbd = KBD_semicolon; return true;
+        case '\'': kbd = KBD_quote; return true;
+        case '`':  kbd = KBD_grave; return true;
+        case '\\': kbd = KBD_backslash; return true;
+        case ',':  kbd = KBD_comma; return true;
+        case '.':  kbd = KBD_period; return true;
+        case '/':  kbd = KBD_slash; return true;
+        /* shifted symbols (US layout) */
+        case '!':  shift = true; kbd = KBD_1; return true;
+        case '@':  shift = true; kbd = KBD_2; return true;
+        case '#':  shift = true; kbd = KBD_3; return true;
+        case '$':  shift = true; kbd = KBD_4; return true;
+        case '%':  shift = true; kbd = KBD_5; return true;
+        case '^':  shift = true; kbd = KBD_6; return true;
+        case '&':  shift = true; kbd = KBD_7; return true;
+        case '*':  shift = true; kbd = KBD_8; return true;
+        case '(':  shift = true; kbd = KBD_9; return true;
+        case ')':  shift = true; kbd = KBD_0; return true;
+        case '_':  shift = true; kbd = KBD_minus; return true;
+        case '+':  shift = true; kbd = KBD_equals; return true;
+        case '{':  shift = true; kbd = KBD_leftbracket; return true;
+        case '}':  shift = true; kbd = KBD_rightbracket; return true;
+        case ':':  shift = true; kbd = KBD_semicolon; return true;
+        case '"':  shift = true; kbd = KBD_quote; return true;
+        case '~':  shift = true; kbd = KBD_grave; return true;
+        case '|':  shift = true; kbd = KBD_backslash; return true;
+        case '<':  shift = true; kbd = KBD_comma; return true;
+        case '>':  shift = true; kbd = KBD_period; return true;
+        case '?':  shift = true; kbd = KBD_slash; return true;
+        default: return false;
+    }
+}
+
+bool parse_send_keys_request(const Json &params, std::vector<KeyEvent> &out, std::string &err) {
+    const Json *keys = params.find("keys");
+    if (keys == nullptr || !keys->isArray() || keys->size() == 0) {
+        err = "missing/empty keys array"; return false;
+    }
+    out.clear();
+    for (size_t i = 0; i < keys->size(); i++) {
+        const Json &el = keys->at(i);
+        if (el.isString()) {
+            int kbd;
+            if (!kbd_key_from_name(el.asString(), kbd)) {
+                err = "unknown key: " + el.asString(); return false;
+            }
+            KeyEvent down = { kbd, true }, up = { kbd, false };
+            out.push_back(down);
+            out.push_back(up);
+        } else if (el.isObject()) {
+            const Json *k = el.find("key");
+            if (k == nullptr || !k->isString()) { err = "key entry missing string \"key\""; return false; }
+            int kbd;
+            if (!kbd_key_from_name(k->asString(), kbd)) {
+                err = "unknown key: " + k->asString(); return false;
+            }
+            bool down = true;
+            const Json *d = el.find("down");
+            if (d != nullptr) {
+                if (!d->isBool()) { err = "down must be a boolean"; return false; }
+                down = d->asBool();
+            }
+            KeyEvent ev = { kbd, down };
+            out.push_back(ev);
+        } else {
+            err = "keys entry must be a string or an object"; return false;
+        }
+        if (out.size() > MCP_KEYS_MAX) { err = "too many key transitions"; return false; }
+    }
+    return true;
+}
+
+Json format_send_keys(size_t transitions) {
+    Json r = Json::object();
+    r.set("injected", Json::boolean(true));
+    r.set("transitions", Json::integer((long long)transitions));
+    return r;
+}
+
+bool parse_type_text_request(const Json &params, std::vector<KeyEvent> &out,
+                             size_t &chars, size_t &skipped, std::string &err) {
+    const Json *t = params.find("text");
+    if (t == nullptr || !t->isString()) { err = "missing/invalid text"; return false; }
+    const std::string &s = t->asString();
+    if (s.size() > MCP_TYPE_MAX) { err = "text too long (max 256 chars)"; return false; }
+    out.clear();
+    chars = 0; skipped = 0;
+    for (size_t i = 0; i < s.size(); i++) {
+        int kbd; bool shift;
+        if (!ascii_to_key(s[i], kbd, shift)) { skipped++; continue; }
+        chars++;
+        if (shift) { KeyEvent e = { KBD_leftshift, true };  out.push_back(e); }
+        { KeyEvent e = { kbd, true };  out.push_back(e); }
+        { KeyEvent e = { kbd, false }; out.push_back(e); }
+        if (shift) { KeyEvent e = { KBD_leftshift, false }; out.push_back(e); }
+    }
+    return true;
+}
+
+Json format_type_text(size_t chars, size_t skipped) {
+    Json r = Json::object();
+    r.set("queued", Json::boolean(true));
+    r.set("chars", Json::integer((long long)chars));
+    r.set("skipped", Json::integer((long long)skipped));
+    return r;
+}
+
+bool parse_mouse_request(const Json &params, MouseRequest &req, std::string &err) {
+    req.dx = req.dy = 0; req.button = 0; req.wheel = 0;
+    const Json *a = params.find("action");
+    if (a == nullptr || !a->isString()) { err = "missing/invalid action"; return false; }
+    const std::string &s = a->asString();
+    if (s == "move") {
+        req.action = MOUSE_MOVE;
+        if (params.has("dx") && !json_to_i32(params.find("dx"), req.dx)) { err = "invalid dx"; return false; }
+        if (params.has("dy") && !json_to_i32(params.find("dy"), req.dy)) { err = "invalid dy"; return false; }
+    } else if (s == "down" || s == "up" || s == "click") {
+        req.action = (s == "down") ? MOUSE_DOWN : (s == "up") ? MOUSE_UP : MOUSE_CLICK;
+        int b = 0;
+        if (params.has("button") && !json_to_i32(params.find("button"), b)) { err = "invalid button"; return false; }
+        if (b < 0 || b > 2) { err = "button must be 0 (left), 1 (right) or 2 (middle)"; return false; }
+        req.button = b;
+    } else if (s == "wheel") {
+        req.action = MOUSE_WHEEL;
+        if (!json_to_i32(params.find("amount"), req.wheel)) { err = "missing/invalid amount"; return false; }
+    } else {
+        err = "unknown action (want move|down|up|click|wheel): " + s; return false;
+    }
+    return true;
+}
+
+Json format_mouse(const MouseRequest &req) {
+    Json r = Json::object();
+    const char *act = req.action == MOUSE_MOVE  ? "move" :
+                      req.action == MOUSE_DOWN  ? "down" :
+                      req.action == MOUSE_UP    ? "up" :
+                      req.action == MOUSE_CLICK ? "click" : "wheel";
+    r.set("action", Json::str(act));
+    if (req.action == MOUSE_MOVE) {
+        r.set("dx", Json::integer((long long)req.dx));
+        r.set("dy", Json::integer((long long)req.dy));
+    } else if (req.action == MOUSE_WHEEL) {
+        r.set("amount", Json::integer((long long)req.wheel));
+    } else {
+        r.set("button", Json::integer((long long)req.button));
+    }
+    r.set("injected", Json::boolean(true));
+    return r;
+}
+
 std::string dispatch(const std::string &method, const Json &params,
                      const Json &id, ExecState state) {
     (void)params;
@@ -701,6 +940,34 @@ std::string dispatch(const std::string &method, const Json &params,
         if (!out.addr_valid)
             return make_error(id, MCP_ERR_INVALID_PARAMS, "segmented selector did not resolve");
         return enforce_max_payload(id, make_result(id, format_mem_write(req, out)));
+    }
+
+    if (method == "send_keys") {
+        /* Run-class: mode_matches guaranteed STATE_RUNNING above, so the guest is
+         * free-running and will consume injected keystrokes. */
+        std::vector<KeyEvent> ev;
+        std::string perr;
+        if (!parse_send_keys_request(params, ev, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        send_keys(ev);
+        return enforce_max_payload(id, make_result(id, format_send_keys(ev.size())));
+    }
+    if (method == "type_text") {
+        std::vector<KeyEvent> ev;
+        size_t chars = 0, skipped = 0;
+        std::string perr;
+        if (!parse_type_text_request(params, ev, chars, skipped, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        type_text_enqueue(ev);
+        return enforce_max_payload(id, make_result(id, format_type_text(chars, skipped)));
+    }
+    if (method == "mouse") {
+        MouseRequest req;
+        std::string perr;
+        if (!parse_mouse_request(params, req, perr))
+            return make_error(id, MCP_ERR_INVALID_PARAMS, perr);
+        mouse_action(req);
+        return enforce_max_payload(id, make_result(id, format_mouse(req)));
     }
 
     /* Known method whose handler arrives in a later slice. */

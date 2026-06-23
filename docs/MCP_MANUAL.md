@@ -9,7 +9,8 @@ themselves (the single source of truth) — this manual does not duplicate schem
 > `ping` / `server_info`. State-touching tools landed so far: `read_registers` (Slice 3),
 > `read_memory` + `disassemble` (Slice 4), execution control `step` / `step_over` /
 > `continue` / `break` (Slice 5), breakpoints `breakpoint_list` / `breakpoint_add` /
-> `breakpoint_delete` (Slice 6), and writes `write_register` / `write_memory` (Slice 7).
+> `breakpoint_delete` (Slice 6), writes `write_register` / `write_memory` (Slice 7), and
+> input injection `send_keys` / `type_text` / `mouse` (Slice 8).
 > Remaining tools land in later slices. Keep workflows here in sync with the implemented
 > tools; update on every feature.
 
@@ -75,7 +76,7 @@ mismatch error telling you the current state; switch with `break` / `continue` f
 (Implemented so far: the `any`-class `ping` / `server_info`; the parked-class
 `read_registers`, `read_memory`, `disassemble`, `step`, `step_over`, `continue`,
 `write_register`, `write_memory`, `breakpoint_list`, `breakpoint_add`,
-`breakpoint_delete`; and the run-class `break`. The
+`breakpoint_delete`; and the run-class `break`, `send_keys`, `type_text`, `mouse`. The
 remaining tools are already classified so mismatches are reported correctly, but their
 handlers land in later slices.)
 
@@ -190,6 +191,35 @@ commands). Always read back to confirm — `read_registers` / `read_memory`.
   bytes, fault}`; `fault: true` means a write hit unmapped/write-protected memory and the
   write stopped early (`written`/`bytes` are the partial counts). The total byte count is
   capped at 4096 — a larger request is rejected with `-32602`, not truncated.
+
+### Injecting input
+Three **run**-class tools drive the guest while it free-runs (`continue` first if parked —
+they return the `-32001` mismatch while parked). They feed the emulated keyboard/mouse, so
+you watch the effect through the screen tools (or, until those land, by reading text-mode
+video memory at `B800:0` with `read_memory`).
+
+- **`send_keys`** injects keyboard transitions. `keys` is a non-empty array whose entries
+  are either a **string key name** (a tap = press then release) or an object
+  **`{key, down}`** for an explicit press/release — use the object form to hold modifiers,
+  e.g. a Ctrl+C chord is `[{key:"leftctrl",down:true},{key:"c",down:true},
+  {key:"c",down:false},{key:"leftctrl",down:false}]`. Names are case-insensitive with
+  aliases (`enter`/`return`, `ctrl`/`leftctrl`, `del`/`delete`, `esc`, `space`, `f1`…`f12`,
+  `up`/`down`/`left`/`right`, `kp0`…, punctuation like `minus`/`slash`/`grave`, …). Capped
+  at 64 transitions per call; an unknown name fails with `-32602`. Replies
+  `{injected: true, transitions}`.
+- **`type_text`** types a literal `text` string (US layout; shifted chars are bracketed
+  with shift automatically). It is **frame-paced** — the keystrokes are queued and fed a
+  few per frame so a long string can't overflow the keyboard buffer — so the reply
+  (`{queued: true, chars, skipped}`) returns immediately while typing continues over the
+  next frames; **wait briefly (or poll the screen) before reading back**. Characters with
+  no key are skipped and counted in `skipped`. Capped at 256 chars (longer → `-32602`).
+  Use `send_keys` for control/function keys and chords; `type_text` for plain text.
+- **`mouse`** performs one action per call, selected by `action`: `move` (`dx`,`dy`
+  relative pixels), `down` / `up` / `click` (`button` 0=left/1=right/2=middle), or `wheel`
+  (`amount`, signed). Replies `{action, …, injected: true}`. (Mouse events reach the guest
+  only when it has a mouse driver/handler installed.)
+
+The input→screen loop is **`continue` → inject → wait → `break` → read screen/memory**.
 
 ### Typical reverse-engineering loop
 _TODO: load target → break at entry → step → inspect → map behavior → record findings._

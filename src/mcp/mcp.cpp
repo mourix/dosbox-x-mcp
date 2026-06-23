@@ -76,6 +76,10 @@ static void MCP_SelfTestScreenshot(void) {
 void MCP_GFXFrameService(void) {
     MCP_SelfTestScreenshot();
 
+    /* Feed any queued type_text keystrokes (Slice 8) into the keyboard
+     * controller a few per frame, before draining new requests. */
+    MCP_InputFrameService();
+
     mcp::Server &srv = mcp::Server::instance();
     srv.ensure_started();
     srv.drain(MCP_CurrentExecState());

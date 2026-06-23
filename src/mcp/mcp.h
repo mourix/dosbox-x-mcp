@@ -14,10 +14,16 @@
 #if C_MCP
 
 /* Compile-time version of the MCP module. Bumped as slices land. */
-#define MCP_VERSION "0.6.0-slice6"
+#define MCP_VERSION "0.8.0-slice8"
 
 /* Returns the MCP module version string (see MCP_VERSION). */
 const char *MCP_Version(void);
+
+/* Advances the frame-paced type_text key queue on the emulator thread (Slice 8).
+ * Defined in mcp_input.cpp; called once per frame from MCP_GFXFrameService so
+ * queued keystrokes are fed into the keyboard controller a few per frame while
+ * the guest runs. A no-op when nothing is queued. */
+void MCP_InputFrameService(void);
 
 /* The emulator-thread "run-class" service point. Called once per frame from
  * GFX_Events() (the single core call site, see the core-edit manifest in

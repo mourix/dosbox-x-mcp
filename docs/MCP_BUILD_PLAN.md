@@ -320,6 +320,36 @@ through the `segmented` space, and asserts the bad-param rejections; wired into 
 (closes the input↔screen loop; depends on Slice 9 read).
 **DoD:** `mcp-check.sh` green.
 
+**Outcome (resolved):** ✅ Shipped. Same reader/formatter split as the other slices; all three
+tools are run-class (serviced at the `GFX_Events` frame tick while the guest free-runs). The thin
+bridge `src/mcp/mcp_input.cpp` reuses existing public APIs, so **no core edits** — the core-edit
+manifest is unchanged (isolation guardrail intact). Two deliberate deviations from the sketch above,
+each to honor the single-threaded / headless discipline (documented in `mcp_protocol.h`):
+- **`type_text` does not use `MAPPER_AutoType`.** That helper spawns a background `std::thread` (the
+  mapper's `Typer`) that mutates keyboard state off the emulator thread and depends on the SDL mapper
+  being initialized — both at odds with this fork's single-threaded model and fragile headless.
+  Instead the pure layer decodes the text to `KeyEvent` transitions (US-layout ASCII→key+shift), the
+  bridge queues them, and `MCP_InputFrameService` (called from the existing `MCP_GFXFrameService`, not
+  a new core call site) feeds a few per frame via `KEYBOARD_AddKey` while the guest runs, respecting
+  `KEYBOARD_BufferSpaceAvail` — single-threaded and paced.
+- **`mouse` uses the direct `Mouse_*` APIs** (`Mouse_CursorMoved`/`Mouse_ButtonPressed`/`Released`/
+  `Mouse_WheelMoved`) rather than `GFX_EventsMouseProcess`, which is window/clip/SDL-event dependent
+  (Win32-centric) and unusable headless.
+
+`send_keys` is `KEYBOARD_AddKey` press/release pairs (string entries = taps; `{key,down}` objects =
+explicit transitions for chords), capped at `MCP_KEYS_MAX` (64) transitions. `type_text` is capped at
+`MCP_TYPE_MAX` (256) chars; undecodable chars are skipped+counted. The pure name/ASCII tables, param
+parsing and JSON formatting live in `mcp_protocol.cpp` (unit-tested, no boot). Unit tests:
+`tests/mcp_protocol_tests.cpp` (`Mcp.KbdKeyFromName`, `Mcp.AsciiToKey`, `Mcp.ParseSendKeys*`,
+`Mcp.ParseTypeText*`, `Mcp.ParseMouse*`, `Mcp.FormatInputResults`, `Mcp.InputClassification`).
+Integration: `scripts/mcp_slice8_input.py` boots headless **without** `-break-start` (the guest
+free-runs to the `Z:\` prompt; `-break-start` can re-park on a BIOS interrupt), then asserts the
+parked mode-mismatch fast-reject, that `send_keys ['d','i','r']` echoes "dir" and `type_text "HELLO"`
+echoes "HELLO" onto the text screen (read back via `read_memory` at `B800:0`, since Slice 9's
+`read_screen` is not built yet), that the five `mouse` actions are accepted/well-formed (no mouse
+driver loaded, so only the bridge wiring is asserted), and the `-32602` bad-param rejections; wired
+into `scripts/mcp-check.sh` (integration test #8).
+
 ## Slice 9 — Screen: `screen_hash` / `read_screen` (text)
 **Goal:** token-cheap screen state with change detection.
 **Changes:** `read_screen` returns the text grid via `ReadCharAttr` when `CurMode->type==M_TEXT`;

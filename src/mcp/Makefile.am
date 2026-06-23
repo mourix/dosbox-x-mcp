@@ -9,4 +9,5 @@ libmcp_a_SOURCES = \
 	mcp_memory.cpp \
 	mcp_execution.cpp \
 	mcp_breakpoints.cpp \
+	mcp_input.cpp \
 	mcp_server.cpp mcp_server.h

@@ -11,8 +11,9 @@ themselves (the single source of truth) — this manual does not duplicate schem
 > `continue` / `break` (Slice 5), breakpoints `breakpoint_list` / `breakpoint_add` /
 > `breakpoint_delete` (Slice 6), writes `write_register` / `write_memory` (Slice 7),
 > input injection `send_keys` / `type_text` / `mouse` (Slice 8), screen reads
-> `read_screen` / `screen_hash` (Slice 9), `take_screenshot` (Slice 10), and the memory
-> scanner `scan_start` / `scan_filter` / `scan_results` (Slice 11).
+> `read_screen` / `screen_hash` (Slice 9), `take_screenshot` (Slice 10), the memory
+> scanner `scan_start` / `scan_filter` / `scan_results` (Slice 11), and in-session
+> lifecycle `reset` / `quit` plus the `scripts/mcp-launch.sh` launcher (Slice 12).
 > Remaining tools land in later slices. Keep workflows here in sync with the implemented
 > tools; update on every feature.
 
@@ -25,12 +26,29 @@ error. The flag defines `C_MCP`; with the flag off, none of the MCP code is buil
 (isolation). The canonical way to build + verify is `scripts/mcp-check.sh`, which builds
 both with and without the flag and runs the test suite headless.
 
-## Headless launch & integration harness
+## Launching a session (`scripts/mcp-launch.sh`)
 
-MCP runs the emulator **headless** by exporting `SDL_VIDEODRIVER=dummy` +
-`SDL_AUDIODRIVER=dummy` (no window, no display/tty). `scripts/mcp_harness.py` is the
-stdlib-only Python launcher that does this and owns the process lifecycle with bounded
-timeouts; per-slice integration scripts build on it and `scripts/mcp-check.sh` runs them.
+`scripts/mcp-launch.sh` is the repeatable launcher. It boots the freshly built
+`src/dosbox-x` with the MCP server listening and takes a **launch mode** — a runtime
+choice over the *same* `--enable-mcp` binary, toggling only the SDL driver env:
+
+- `--mode headless` (default) exports `SDL_VIDEODRIVER=dummy` + `SDL_AUDIODRIVER=dummy`:
+  no window, no display/tty/audio. This is the CI / `scripts/mcp-check.sh` path.
+- `--mode visible` leaves those unset, so a real SDL window opens (WSLg under WSL2) and
+  you can watch the guest. The MCP server, tools, dispatcher, screen reads, and input
+  injection are **identical** to headless — only the guest window differs.
+
+Common options: `--port N` (required; the `127.0.0.1` MCP port), `--mount DIR` (mount as
+`C:` and `cd` into it), `--run "CMD"` (repeatable autoexec line — launches a known target
+by name), `--config FILE`, `--break-start` (park the CPU at reset so parked-class tools
+work immediately), and `--` to pass any remaining args verbatim to dosbox-x. Example:
+
+```
+scripts/mcp-launch.sh --port 5022 --mount ./game --run GAME.EXE --break-start
+```
+
+`scripts/mcp_harness.py` is the stdlib-only Python harness the per-slice integration tests
+use for headless boot + process lifecycle; `scripts/mcp-check.sh` runs them all.
 
 Slice 1's integration test (`scripts/mcp_slice1_screenshot.py`) verifies that the
 capture path produces a PNG under the dummy video driver. It uses a temporary
@@ -279,6 +297,24 @@ Typical loop: `scan_start` over a likely range → let the value change in the g
 bit, or write it) → `scan_filter` for the new value (or `use_prev` for changed/unchanged) →
 repeat until `scan_results` shows a handful of addresses → confirm with `read_memory`, or plant
 a `mem`/`mem_freeze` breakpoint to watch writes.
+
+### Lifecycle: reset / quit
+Two **any**-class tools control the session itself (serviceable whether the guest is running
+or parked):
+
+- **`reset`** reboots the emulated machine — equivalent to the menu *Reset* (a hardware
+  reset back to the BIOS/boot). Use it to return to a clean state without relaunching the
+  process; the MCP server, your connection, and any launch config survive the reboot. If the
+  guest was parked, the debugger is disengaged first and the machine reboots into the normal
+  loop; if you launched with `--break-start` it **re-parks at the reset vector**, so
+  `read_registers` right after shows the same CS:EIP as the original boot.
+- **`quit`** shuts the emulator down and exits the process cleanly (the kill switch).
+
+Both return a **deferred ack** `{op, ok: true, deferred: true}` *immediately*, then perform
+the action a few frames later — so the reply reaches you before the machine reboots / the
+process exits (you do not need to send a signal to stop it). After `reset`, poll `ping` until
+the state settles (and, under `--break-start`, until it is `parked` again) before issuing more
+tools. After `quit`, the connection drops as the process exits; do not send further requests.
 
 ### Typical reverse-engineering loop
 _TODO: load target → break at entry → step → inspect → map behavior → record findings._

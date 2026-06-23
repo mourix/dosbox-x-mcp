@@ -1303,4 +1303,32 @@ TEST(Mcp, ScanClassification)
     EXPECT_TRUE(mode_matches(CLS_PARKED, STATE_PARKED));
 }
 
+// -- lifecycle: reset / quit (Slice 12) ------------------------------------
+
+TEST(Mcp, FormatLifecycle)
+{
+    Json reset = format_lifecycle(LIFE_RESET);
+    EXPECT_EQ(reset.find("op")->asString(), "reset");
+    EXPECT_TRUE(reset.find("ok")->asBool());
+    EXPECT_TRUE(reset.find("deferred")->asBool());
+
+    Json quit = format_lifecycle(LIFE_QUIT);
+    EXPECT_EQ(quit.find("op")->asString(), "quit");
+    EXPECT_TRUE(quit.find("ok")->asBool());
+    EXPECT_TRUE(quit.find("deferred")->asBool());
+
+    EXPECT_LE(reset.serialize().size(), MCP_MAX_PAYLOAD);
+    EXPECT_LE(quit.serialize().size(), MCP_MAX_PAYLOAD);
+}
+
+// reset/quit are serviceable in either execution state (CLS_ANY): the client may
+// reboot or shut the emulator down whether the guest is free-running or parked.
+TEST(Mcp, LifecycleClassification)
+{
+    EXPECT_EQ(classify("reset"), CLS_ANY);
+    EXPECT_EQ(classify("quit"), CLS_ANY);
+    EXPECT_TRUE(mode_matches(CLS_ANY, STATE_RUNNING));
+    EXPECT_TRUE(mode_matches(CLS_ANY, STATE_PARKED));
+}
+
 } // namespace

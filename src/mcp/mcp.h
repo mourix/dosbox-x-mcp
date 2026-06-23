@@ -14,7 +14,7 @@
 #if C_MCP
 
 /* Compile-time version of the MCP module. Bumped as slices land. */
-#define MCP_VERSION "0.8.0-slice8"
+#define MCP_VERSION "0.12.0-slice12"
 
 /* Returns the MCP module version string (see MCP_VERSION). */
 const char *MCP_Version(void);
@@ -34,6 +34,13 @@ void MCP_InputFrameService(void);
  * run-class and parked-class requests. It also runs the env-gated Slice 1
  * screenshot self-test (MCP_SELFTEST_SCREENSHOT); a no-op otherwise. */
 void MCP_GFXFrameService(void);
+
+/* Performs a pending reset/quit on the emulator thread (Slice 12). Defined in
+ * mcp_lifecycle.cpp; called once per frame from MCP_GFXFrameService *after* the
+ * queue drain, so the reset/quit reply reaches the client before the machine
+ * reboots / the process exits. A no-op until a reset/quit is requested, then it
+ * throws int(3)/int(0) which DOSBOX_RunMachine catches. */
+void MCP_LifecycleService(void);
 
 #endif /* C_MCP */
 

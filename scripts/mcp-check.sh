@@ -148,6 +148,9 @@ python3 scripts/mcp_slice10_screenshot.py || fail "integration test #10 (take_sc
 log "running integration test #11: memory scanner (Slice 11)"
 python3 scripts/mcp_slice11_scan.py || fail "integration test #11 (memory scanner) failed"
 
+log "running integration test #12: lifecycle launcher + reset/quit (Slice 12)"
+python3 scripts/mcp_slice12_lifecycle.py || fail "integration test #12 (lifecycle) failed"
+
 # 4. Isolation proof: the core must still build with the flag OFF.
 if [ "${MCP_SKIP_ISOLATION:-0}" != "1" ]; then
     build

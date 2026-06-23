@@ -621,6 +621,30 @@ long     scan_filter(const ScanFilterRequest &req, ScanState &st);
 void     scan_state(ScanState &st);
 uint32_t scan_results(uint32_t start, size_t max, std::vector<ScanMatch> &out);
 
+/* ---- lifecycle (Slice 12) -----------------------------------------------
+ *
+ * reset / quit — in-session lifecycle control. Both are CLS_ANY (serviceable in
+ * either execution state). Same reader/formatter split as the other slices: the
+ * JSON formatting is pure here (unit-tested with no boot), while the actual
+ * action is recorded by the bridge mcp_lifecycle.cpp and *performed on the
+ * emulator thread after the reply has been flushed* — the reset/quit throw
+ * (int(3) reboot / int(0) kill switch, the same signals the menu Reset and the
+ * quit path use) must propagate up to DOSBOX_RunMachine, not interrupt the
+ * dispatcher mid-reply. So the handler returns a normal success reply and the
+ * action fires a few frames later via MCP_LifecycleService (called from
+ * MCP_GFXFrameService, the existing core call site). No new core edit: the throw
+ * originates in the MCP module, and reset-while-parked first disengages the
+ * debugger by reusing the Slice 5 core edit MCP_DebugExec (continue). */
+enum LifecycleOp { LIFE_RESET, LIFE_QUIT };
+
+/* Bridge (mcp_lifecycle.cpp): record a pending reset/quit. Runs on the emulator
+ * thread (in the dispatcher). The action is deferred to MCP_LifecycleService so
+ * the success reply reaches the client before the machine reboots / exits. */
+void lifecycle_request(LifecycleOp op);
+
+/* Pure: format the lifecycle acknowledgement reply. */
+Json format_lifecycle(LifecycleOp op);
+
 /* Internal sentinel reply meaning "not ready — re-queue and retry next frame".
  * Returned by dispatch for an in-progress take_screenshot; the server re-queues
  * the request instead of replying. Never sent to a client (it is not valid

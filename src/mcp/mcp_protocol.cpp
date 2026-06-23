@@ -987,6 +987,16 @@ Json format_scan_results(const ScanState &st, const std::vector<ScanMatch> &matc
     return r;
 }
 
+Json format_lifecycle(LifecycleOp op) {
+    Json r = Json::object();
+    r.set("op", Json::str(op == LIFE_RESET ? "reset" : "quit"));
+    r.set("ok", Json::boolean(true));
+    /* The action is deferred so this reply reaches the client first; the machine
+     * reboots (reset) or the process exits (quit) a few frames later. */
+    r.set("deferred", Json::boolean(true));
+    return r;
+}
+
 const std::string &defer_sentinel() {
     /* Leading control byte → never a valid JSON response line, so the server can
      * distinguish "re-queue me" from a real reply with a simple equality check. */
@@ -1007,6 +1017,14 @@ std::string dispatch(const std::string &method, const Json &params,
         return enforce_max_payload(id, make_result(id, handle_ping(state)));
     if (method == "server_info")
         return enforce_max_payload(id, make_result(id, handle_server_info(state)));
+    if (method == "reset" || method == "quit") {
+        /* CLS_ANY: serviceable in either state. Record the action; it fires a few
+         * frames later (MCP_LifecycleService) so this reply is flushed before the
+         * machine reboots / the process exits. */
+        LifecycleOp op = method == "reset" ? LIFE_RESET : LIFE_QUIT;
+        lifecycle_request(op);
+        return enforce_max_payload(id, make_result(id, format_lifecycle(op)));
+    }
     if (method == "read_registers") {
         /* Parked-class: mode_matches already guaranteed STATE_PARKED above, so
          * the CPU is stopped and the snapshot is coherent. */

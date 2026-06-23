@@ -100,6 +100,12 @@ glance. Adding a core edit means adding a line here with its justification.
 | Breakpoint bridge `MCP_Breakpoint{Add,Delete,Count,Get}()` + two `CBreakpoint` friend decls | `debug.cpp` (after `MCP_DebugExec`; friends near `BPoints`) | `#if C_MCP` free functions the MCP module calls for breakpoint_list/add/delete (Slice 6). They must live in `debug.cpp` because the breakpoint store (`CBreakpoint` and its private static `BPoints`) is not exported. Add/Delete reuse the public `CBreakpoint::Add*`/`DeleteByIndex`/`DeleteAll` API the BP/BPINT/BPM/BPDEL commands use; the two list-readers need `BPoints`, so they are `friend`s of `CBreakpoint` (the same pattern as the existing `DEBUG_HeavyIsBreakpoint` friend). Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
 | Memory-scanner bridge `MCP_Scan{Start,Filter,State,Results,Cancel}()` | `debug.cpp` (after `MCP_BreakpointGet`) | `#if C_MCP` free functions the MCP module calls for scan_start/scan_filter/scan_results (Slice 11). They must live in `debug.cpp` because the scanner store — the single global `MEMFINDInstance` and its file-private `MEMFinder` struct — is not exported. They mirror the existing MEMFIND-start / MEMS-filter / MEMFIND-L-list algorithms exactly, exposing structured out-params instead of `DEBUG_ShowMsg` text. Two programmatic-client conveniences vs the interactive commands: Start replaces an in-progress scan (MEMFIND rejects it), and Filter does not auto-delete the instance at 0 matches (MEMS does) so Results stays callable. The existing MEMFIND/MEMS `ParseCommand` handlers are **unchanged**. Compiled away entirely without `--enable-mcp`; no behavior change to the existing handlers. |
 
+**Slice 12 (lifecycle: launcher + reset/quit) adds no new core edit.** The reset/quit throw
+(`int(3)` reboot / `int(0)` kill switch — the signals `DOSBOX_RunMachine` already catches) originates
+in the MCP module (`src/mcp/mcp_lifecycle.cpp`) and is raised from the existing `MCP_GFXFrameService`
+call site after the queue drain; a reset arriving while parked disengages the debugger by reusing the
+Slice 5 `MCP_DebugExec` (continue) above. So the blast radius is unchanged from Slice 11.
+
 ## Test strategy (two layers)
 
 - **Unit (fast, in-binary gtest):** request parsing, JSON formatting, response bounding /
@@ -458,6 +464,29 @@ a known state (CI path). Visible mode is the same code path with the driver env 
 no separate CI assertion (CI has no display); a scripted smoke check that the launcher accepts the
 flag and sets/unsets the env vars is enough.
 **DoD:** `mcp-check.sh` green; visible mode documented in `docs/MCP_MANUAL.md`.
+
+**Outcome (resolved):** ✅ Shipped. The launcher is `scripts/mcp-launch.sh`: it takes
+`--mode headless|visible` (default headless) and toggles **only** the SDL driver env
+(`SDL_VIDEODRIVER`/`SDL_AUDIODRIVER=dummy` for headless, unset for visible — same `--enable-mcp`
+binary, same MCP server), sets `MCP_PORT`, and wires mount/config/`--break-start`/`--run` into the
+dosbox-x args (`-c` autoexec lines launch a known target by name). A `MCP_LAUNCH_DRYRUN=1` hook
+prints the resolved env + argv without booting, so the env toggle is CI-assertable with no display.
+`reset` and `quit` are CLS_ANY tools with the same reader/formatter split as the other slices, but
+**no new core edit**: the action is a C++ throw that must propagate to `DOSBOX_RunMachine`'s catch
+(`gui/sdlmain.cpp`) and fire only *after* the success reply is flushed, so the bridge
+`src/mcp/mcp_lifecycle.cpp` records a pending op (pure `format_lifecycle` returns a deferred ack)
+and `MCP_LifecycleService` — called once per frame from the existing `MCP_GFXFrameService` call site,
+after the queue drain — lets a few frames pass (reply flushes) then throws `int(3)` (reboot) / `int(0)`
+(kill switch). The throw originates in the MCP module; a `reset` arriving while parked first disengages
+the debugger by reusing the **Slice 5 core edit** `MCP_DebugExec` (continue), so the reboot re-enters
+the normal loop instead of the debugger loop, then `-break-start` re-parks at the reset vector. Unit
+tests: `tests/mcp_protocol_tests.cpp` (`Mcp.FormatLifecycle`, `Mcp.LifecycleClassification`) cover the
+ack shape, the payload bound, and the CLS_ANY classification. Integration:
+`scripts/mcp_slice12_lifecycle.py` asserts the launcher env toggle (dry-run, both modes), boots a known
+target headless to the `Z:\` prompt, `quit`s a running guest and confirms the process exits on its own
+(no SIGTERM), and — under `-break-start` — steps EIP off the reset vector, `reset`s, confirms the
+machine reboots back to the **same** reset vector, then `quit`s while parked; wired into
+`scripts/mcp-check.sh` (integration test #12).
 
 ## Slice 13 — Manual finalize + optional command passthrough
 **Goal:** living manual complete; optional escape hatch.

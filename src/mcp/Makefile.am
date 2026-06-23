@@ -13,4 +13,5 @@ libmcp_a_SOURCES = \
 	mcp_input.cpp \
 	mcp_screen.cpp \
 	mcp_screenshot.cpp \
+	mcp_lifecycle.cpp \
 	mcp_server.cpp mcp_server.h

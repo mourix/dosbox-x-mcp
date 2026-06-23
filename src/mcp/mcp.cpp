@@ -83,6 +83,11 @@ void MCP_GFXFrameService(void) {
     mcp::Server &srv = mcp::Server::instance();
     srv.ensure_started();
     srv.drain(MCP_CurrentExecState());
+
+    /* Perform a pending reset/quit, if any. Done after the drain so the
+     * acknowledgement reply has been delivered to the client; this may throw
+     * int(3)/int(0) (reboot / kill switch), caught in DOSBOX_RunMachine. */
+    MCP_LifecycleService();
 }
 
 #endif /* C_MCP */

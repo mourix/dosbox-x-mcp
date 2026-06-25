@@ -924,6 +924,14 @@ bool parse_scan_start_request(const Json &params, ScanStartRequest &req, std::st
         }
         req.width = (int)w;
     }
+
+    /* Round the range down to a whole number of elements. The scanner's
+     * snapshot/filter loops stride by width over byte-sized tables; a range that
+     * is not a multiple of width would make the last use_prev comparison read
+     * past the end of the snapshot. Keeping it a whole multiple makes the bridge
+     * safe by construction (no core edit needed). */
+    req.range -= req.range % (uint32_t)req.width;
+    if (req.range == 0) { err = "range smaller than element width"; return false; }
     return true;
 }
 

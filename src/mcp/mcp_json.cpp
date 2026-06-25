@@ -143,6 +143,12 @@ std::string Json::serialize() const {
 
 namespace {
 
+/* Cap nesting so a hostile/garbled client cannot blow the stack with deeply
+ * nested arrays/objects (a 64 KiB line of '[' would otherwise recurse ~64 K
+ * deep). JSON-RPC control traffic is shallow; 64 is far more than real requests
+ * need. Hit means the document is rejected as a parse error. */
+const int kMaxDepth = 64;
+
 struct Parser {
     const char *p;
     const char *end;
@@ -151,7 +157,7 @@ struct Parser {
         while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) ++p;
     }
 
-    bool parseValue(Json &out);
+    bool parseValue(Json &out, int depth);
 
     bool parseString(std::string &s) {
         if (p >= end || *p != '"') return false;
@@ -236,12 +242,13 @@ struct Parser {
     }
 };
 
-bool Parser::parseValue(Json &out) {
+bool Parser::parseValue(Json &out, int depth) {
     skipWs();
     if (p >= end) return false;
     char c = *p;
     switch (c) {
         case '{': {
+            if (depth >= kMaxDepth) return false;   /* too deeply nested */
             ++p; out = Json::object(); skipWs();
             if (p < end && *p == '}') { ++p; return true; }
             for (;;) {
@@ -252,7 +259,7 @@ bool Parser::parseValue(Json &out) {
                 if (p >= end || *p != ':') return false;
                 ++p;
                 Json v;
-                if (!parseValue(v)) return false;
+                if (!parseValue(v, depth + 1)) return false;
                 out.set(key, v);
                 skipWs();
                 if (p >= end) return false;
@@ -262,11 +269,12 @@ bool Parser::parseValue(Json &out) {
             }
         }
         case '[': {
+            if (depth >= kMaxDepth) return false;   /* too deeply nested */
             ++p; out = Json::array(); skipWs();
             if (p < end && *p == ']') { ++p; return true; }
             for (;;) {
                 Json v;
-                if (!parseValue(v)) return false;
+                if (!parseValue(v, depth + 1)) return false;
                 out.push(v);
                 skipWs();
                 if (p >= end) return false;
@@ -296,7 +304,7 @@ bool Json::parse(const std::string &in, Json &out) {
     ps.p = in.c_str();
     ps.end = ps.p + in.size();
     Json v;
-    if (!ps.parseValue(v)) return false;
+    if (!ps.parseValue(v, 0)) return false;
     ps.skipWs();
     if (ps.p != ps.end) return false; /* trailing garbage */
     out = v;

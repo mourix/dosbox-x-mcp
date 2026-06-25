@@ -73,6 +73,22 @@ TEST(Mcp, JsonRejectsTrailingGarbage)
     EXPECT_FALSE(Json::parse("", j));
 }
 
+TEST(Mcp, JsonRejectsDeeplyNested)
+{
+    /* A document nested past the parser's depth cap must be rejected (parse
+     * error) rather than recursing until the stack overflows. Build a string of
+     * many '[' so nesting far exceeds the cap, then close it. */
+    std::string deep(20000, '[');
+    deep.append(20000, ']');
+    Json j;
+    EXPECT_FALSE(Json::parse(deep, j));
+
+    /* A modestly nested document well under the cap still parses fine. */
+    std::string ok = "[[[[[[[[1]]]]]]]]"; /* depth 8 */
+    Json k;
+    EXPECT_TRUE(Json::parse(ok, k));
+}
+
 // -- classification & mode matching ---------------------------------------
 
 TEST(Mcp, Classification)
@@ -1195,6 +1211,26 @@ TEST(Mcp, ParseScanStartDefaultsAndClamp)
     ASSERT_TRUE(parse_scan_start_request(parse_params(big), req, err)) << err;
     EXPECT_EQ(req.width, 4);
     EXPECT_EQ((size_t)req.range, MCP_SCAN_RANGE_MAX);
+}
+
+TEST(Mcp, ParseScanStartRoundsRangeToWidth)
+{
+    ScanStartRequest req;
+    std::string err;
+    // A range that is not a whole number of elements is rounded down so the
+    // scanner's width-strided snapshot/filter loops never read past the table.
+    ASSERT_TRUE(parse_scan_start_request(
+        parse_params("{\"seg\":0,\"off\":0,\"range\":10,\"width\":4}"), req, err)) << err;
+    EXPECT_EQ(req.width, 4);
+    EXPECT_EQ(req.range, 8u); // 10 -> 8 (two 4-byte elements)
+
+    ASSERT_TRUE(parse_scan_start_request(
+        parse_params("{\"seg\":0,\"off\":0,\"range\":7,\"width\":2}"), req, err)) << err;
+    EXPECT_EQ(req.range, 6u); // 7 -> 6
+
+    // A range smaller than one element is rejected, not silently zeroed.
+    EXPECT_FALSE(parse_scan_start_request(
+        parse_params("{\"seg\":0,\"off\":0,\"range\":3,\"width\":4}"), req, err));
 }
 
 TEST(Mcp, ParseScanStartRejectsBadInput)

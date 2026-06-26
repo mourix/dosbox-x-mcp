@@ -174,4 +174,20 @@ python3 scripts/mcp_slice12_lifecycle.py || fail "integration test #12 (lifecycl
 log "running integration test #13: debugger_command passthrough (Slice 13)"
 python3 scripts/mcp_slice13_passthrough.py || fail "integration test #13 (debugger_command passthrough) failed"
 
+# 4c. MCP client bridge (Slice 14) — node-based, so gated on node >= 18 being
+# present. Without node the C++-only flow still passes deterministically (the
+# bridge is additive and not part of the emulator build).
+NODE_OK=0
+if command -v node >/dev/null 2>&1; then
+    NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+    [ "${NODE_MAJOR:-0}" -ge 18 ] && NODE_OK=1
+fi
+if [ "$NODE_OK" = "1" ]; then
+    log "running integration test #14: MCP client bridge (Slice 14)"
+    ( cd mcp-bridge && npm install --no-audit --no-fund >/dev/null ) || fail "bridge: npm install failed"
+    ( cd mcp-bridge && node --test test/*.test.mjs ) || fail "integration test #14 (MCP bridge) failed"
+else
+    log "SKIP integration test #14 (MCP client bridge): node >= 18 not found"
+fi
+
 log "PASSED"

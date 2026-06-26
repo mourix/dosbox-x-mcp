@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "dosbox-x": {
+      "command": "node",
+      "args": [
+        "mcp-bridge/bridge.mjs"
+      ],
+      "env": {
+        "DOSBOX_MCP_MODE": "headless"
+      }
+    }
+  }
+}

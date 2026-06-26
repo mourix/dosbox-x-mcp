@@ -1,0 +1,20 @@
+{
+  "name": "dosbox-x-mcp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "stdio<->TCP bridge exposing the DOSBox-X debugger toolset as an MCP server for Claude Code",
+  "type": "module",
+  "bin": {
+    "dosbox-x-mcp-bridge": "bridge.mjs"
+  },
+  "scripts": {
+    "start": "node bridge.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

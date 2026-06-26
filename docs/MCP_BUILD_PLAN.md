@@ -520,6 +520,47 @@ unknown command (`recognized:false`), and the missing-`command` `-32602` rejecti
 implemented tool has a workflow, the status note covers all 13 slices, and the reverse-engineering
 loop is filled in.
 
+## Slice 14 — MCP client bridge / Claude Code integration
+
+**Goal:** make the toolset usable from Claude Code (or any MCP client). The emulator speaks a
+flat **TCP JSON-RPC** dialect (`{method, params}` → `{result|error}`, newline-delimited); MCP
+clients speak the **MCP stdio transport** (newline-delimited JSON-RPC with an `initialize`
+handshake and `tools/list` / `tools/call` envelopes). Slice 14 adds a thin bridge between them
+plus a one-command installer.
+
+**Core-edit manifest: NO CHANGE.** This slice is **purely additive** — a standalone Node project
+(`mcp-bridge/`) and shell scripts; **zero edits to `src/`** (no core/debugger/emulator code). The
+isolation guardrail (#1) holds trivially: the emulator binary and its TCP protocol are untouched.
+
+**Shape:**
+- `mcp-bridge/` (Node, ESM, dep `@modelcontextprotocol/sdk`):
+  - `tools.mjs` — the 26-tool catalog (name, JSON-Schema params mirroring the C++ param keys,
+    run/parked/any state in each description). The **client-facing single source of truth** for
+    schemas; a **sync-guard** test asserts the catalog name-set equals the `method == "…"` table in
+    `src/mcp/mcp_protocol.cpp`, so a tool added/removed in C++ without a catalog change fails CI.
+  - `tcp-client.mjs` — newline-delimited JSON-RPC client (id map, sequential queue since the
+    emulator is single-client, 8 s per-call timeout above the server's 5 s).
+  - `launcher.mjs` — managed lifecycle: spawn `scripts/mcp-launch.sh` on a free port, wait for the
+    port, own teardown. Child stdio routed to **stderr** (stdout is the MCP channel).
+  - `bridge.mjs` — low-level SDK `Server` + `StdioServerTransport`; `ListTools` from the catalog,
+    `CallTool` → TCP method call → MCP result (`structuredContent` + pretty JSON text; a JSON-RPC
+    error, e.g. `-32001` mismatch, maps to `isError` carrying `data.state`). Lifecycle is
+    **attach-or-spawn**: `DOSBOX_MCP_PORT` reachable → attach (watch a `--mode visible` guest);
+    else spawn a managed headless emulator.
+- `scripts/mcp-install.sh` — checks binary + Node ≥ 18, `npm install`, writes/merges a project
+  `.mcp.json` (absolute bridge path; `DOSBOX_MCP_*` defaults from flags), optional `--user`
+  `claude mcp add`, runs the smoke test.
+
+**Tests / verification:** `mcp-bridge/test/` (`node --test`): `sync-guard.test.mjs` (catalog ↔ C++
+parity, no boot) and `bridge.test.mjs` (managed end-to-end — `initialize` → `tools/list` asserts all
+26 + schemas → `tools/call ping`/`read_registers` while parked → a run-state tool while parked
+returns `isError` with the state). Wired into `scripts/mcp-check.sh` as integration test #14, gated
+on Node ≥ 18 (clean SKIP otherwise, so the C++-only flow stays deterministic). Skips gracefully if
+the binary is unbuilt.
+
+**Outcome:** ✅ Shipped. `scripts/mcp-install.sh` registers a `dosbox-x` MCP server; the 26 tools
+appear in Claude Code over stdio with no change to the emulator.
+
 ---
 
 ### Dependency notes

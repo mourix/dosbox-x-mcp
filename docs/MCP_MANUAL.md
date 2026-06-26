@@ -14,8 +14,10 @@ themselves (the single source of truth) — this manual does not duplicate schem
 > `read_screen` / `screen_hash` (Slice 9), `take_screenshot` (Slice 10), the memory
 > scanner `scan_start` / `scan_filter` / `scan_results` (Slice 11), in-session
 > lifecycle `reset` / `quit` plus the `scripts/mcp-launch.sh` launcher (Slice 12), and
-> the `debugger_command` passthrough escape hatch (Slice 13). Keep workflows here in
-> sync with the tool set; update on every change.
+> the `debugger_command` passthrough escape hatch (Slice 13), and the **MCP client
+> bridge** (Slice 14) that exposes the whole toolset to Claude Code over the standard
+> MCP stdio transport (`mcp-bridge/`, installed via `scripts/mcp-install.sh`). Keep
+> workflows here in sync with the tool set; update on every change.
 
 ## Build flag
 
@@ -25,6 +27,38 @@ The MCP server is compiled in only when DOSBox-X is configured with `--enable-mc
 error. The flag defines `C_MCP`; with the flag off, none of the MCP code is built
 (isolation). The canonical way to build + verify is `scripts/mcp-check.sh`, which builds
 both with and without the flag and runs the test suite headless.
+
+## Installing for Claude Code (`scripts/mcp-install.sh` + `mcp-bridge/`)
+
+The emulator's MCP endpoint is a **raw TCP JSON-RPC** socket, not the MCP stdio
+transport an MCP client speaks. The bridge in `mcp-bridge/` (Node + the official
+`@modelcontextprotocol/sdk`) closes that gap: it serves the tool catalog over stdio and
+forwards each `tools/call` to the emulator's flat TCP method. To install it as a
+registered MCP server:
+
+```
+scripts/mcp-install.sh            # writes a project .mcp.json (committed, shareable)
+scripts/mcp-install.sh --user     # …and registers it in personal config (claude mcp add)
+```
+
+The installer checks the built binary + Node ≥ 18, runs `npm install` in `mcp-bridge/`,
+writes/merges `.mcp.json`, and runs the bridge smoke test. Open the repo in Claude Code
+and `/mcp` to connect; the 26 tools below appear as MCP tools.
+
+**Emulator lifecycle — attach or spawn.** The bridge decides at runtime how to reach the
+emulator, configured by `DOSBOX_MCP_*` env vars set in `.mcp.json`:
+
+- **Managed (default):** no `DOSBOX_MCP_PORT` → the bridge spawns a **headless** emulator
+  via `scripts/mcp-launch.sh` and owns its lifecycle (torn down when the session ends).
+- **Attach:** `DOSBOX_MCP_PORT` set **and reachable** → the bridge connects to that
+  already-running emulator. Launch `scripts/mcp-launch.sh --port N --mode visible`
+  yourself to **watch** the guest while Claude drives it.
+
+Knobs (env): `DOSBOX_MCP_MODE` (`headless`|`visible`), `DOSBOX_MCP_MOUNT`,
+`DOSBOX_MCP_RUN`, `DOSBOX_MCP_BREAK_START`, `DOSBOX_MCP_CONFIG`, `DOSBOX_MCP_PORT`,
+`DOSBOX_MCP_HOST` — the installer bakes them in from its `--mode`/`--mount`/`--run`/
+`--break-start`/`--port` flags. See `mcp-bridge/README.md`. The bridge is a thin
+translation layer: every tool's parameters and semantics are exactly as documented below.
 
 ## Launching a session (`scripts/mcp-launch.sh`)
 
